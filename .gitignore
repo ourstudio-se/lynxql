@@ -1,0 +1,35 @@
+# Rust
+/target
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VSCode extension (not part of the Rust crate)
+vscode-lynx-extension/
+
+# Temporary files
+*.tmp
+
+# Test and debug files
+test_*.lynx
+debug_*.lynx
+*_test.lynx
+comprehensive_test.lynx
+error_test.lynx
+simple_test.lynx
+
+# Documentation drafts
+debug_vscode_setup.md
+IMPROVED_LSP_SETUP.md
+INSTALLATION_COMPLETE.md
+SETUP_LSP.md
+
+# Claude
+.claude/

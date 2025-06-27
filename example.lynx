@@ -1,0 +1,153 @@
+
+// COMMENTS are 
+// 1. Single line comments "//"
+// 2. Multi-line comments "/* ... */"
+
+// Property type declaration. Probably not used that often, but useful for defining properties of primitive types.
+type Size: int
+type BoxType: string
+
+enum Material {
+    Steel,
+    Wood,
+    Plastic
+}
+
+// Primitive type declaration
+// We define a type Hammer as a boolean type with additional properties
+type Hammer: bool {
+  material: Material,
+  size: Size,
+  cost: float,
+  
+  // Conditional property declaration on type level.
+  // The cost of a hammer is determined by its material and size.
+  weight: int = (h: Hammer) -> match({
+    h.material == "steel": 10,
+    h.material == "wood": 7,
+    _: 5
+  })
+}
+
+type Nail: bool {
+  length: int,
+  amount: int,
+  cost: float
+}
+
+type BoxType: bool {
+  width: int,
+  height: int,
+  depth: int
+}
+
+type Toolbox: All {}
+
+// Composite type declarations
+// "All" means that each relationship must be satisfied for the type to be valid.
+// If it was for instance "Any" instead of "All", then it would be enough for "hammer" to be satisfied for Toolbox be valid.
+type Toolbox: All {
+  
+  // A toolbox must contain at least one hammer
+  // By default, we assign all hammers that have a size of at least 8 to the toolbox.
+  hammers: AtLeast<1>[Hammer] = (t: Toolbox) -> find((h: Hammer) -> h.size >= 8),
+  
+  // A toolbox can contain multiple nails or none (? means optional)
+  nails: Any[Nail]?
+
+  // A toolbox has a BoxType. This is an enum type since when Toolbox is instantiated,
+  // it must be assigned a BoxType. 
+  boxType: BoxType,
+}
+
+type Carpenter: All {
+  
+  // A carpenter has a name and an age
+  name: string,
+  age: int,
+
+  // Conditional property declaration on type level.
+  // By default, the carpenter is considered workable if they are at least 18 years old.
+  workable: bool = (c: Carpenter) -> c.age >= 18,
+  
+  // A carpenter must have a toolbox
+  toolbox: Toolbox
+
+  // This is a way to dynamically calculate the salery
+  salery: float = (c: Carpenter) -> 20000.0 - (sum(c.toolbox.hammers.cost) + sum(c.toolbox.nails, 0.0))
+}
+
+
+// Instantiation of types
+// Here we create a specific instance of the Carpenter type
+Hammer hammer1 {
+  material: Material.Steel,
+  size: 10
+}
+Hammer hammer2 {
+  material: Material.Wood,
+  size: 8
+}
+Nail nail1 {
+  length: 5,
+  amount: 100
+}
+Nail nail2 {
+  length: 10,
+  amount: 50
+}
+BoxType boxType1 {
+  width: 30,
+  height: 20,
+  depth: 15
+}
+Carpenter john {
+  name: "John Doe",
+  age: 30,
+
+  // Overriding the default property "workable" to true
+  workable: true,
+
+  // Assigning a toolbox to the carpenter
+  toolbox: Toolbox {
+    // Overriding the default hammer property to include specific hammers
+    hammers: AtLeast<1> {hammer1, hammer2},
+    nails: Any {nail1, nail2},
+    boxType: boxType1
+  }
+}
+Carpenter jane {
+  name: "Jane Smith",
+  age: 25,
+  toolbox: Toolbox {
+    hammers: AtLeast<1> {hammer1, hammer2},
+    // Using a lambda function to find nails with length >= 10
+    // Notice that this will pick up the nail3 instance defined later
+    nails: Any { find((n: Nail) -> n.length >= 10) },
+    boxType: boxType1
+  }
+}
+
+// Additional instances of Nail (note that this would appear in the toolbox of Jane)
+Nail nail3 {
+  length: 12,
+  amount: 55
+}
+
+// "Locking" nail3 to be true
+nail3 = 1..1
+
+// Finding a solution for the carpenter "john"
+// Where we prefer nail3 over nail2 and nail1, and we do not want to use hammer1 
+a_john_instance = solve(john, { nail3: 3.0, nail: 2.0, nail1: 1.0 }, { Not { hammer1 } })
+
+// Finding one carpenter with same parameters
+a_carpenter_instances = solve(
+  Exactly<1> { find((x: Carpenter) -> x)}, // Model
+  { nail3: 3.0, nail: 2.0, nail1: 1.0 }, // Objective
+  { Not { hammer1 } } // Additional constraints
+)
+
+// Select the first one in the list
+a_carpenter = first(a_carpenter_instances)
+a_carpenter.salery

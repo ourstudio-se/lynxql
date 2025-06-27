@@ -1,0 +1,38 @@
+[package]
+name = "lynxql"
+version = "0.1.0"
+edition = "2021"
+description = "A parser for the Lynx declarative modeling language - a statically typed language for expressing combinatorial optimization problems"
+license = "MIT"
+repository = "https://github.com/lynx-lang/lynxql"
+homepage = "https://github.com/lynx-lang/lynxql"
+documentation = "https://docs.rs/lynxql"
+readme = "README.md"
+keywords = ["parser", "declarative", "optimization", "combinatorial", "modeling"]
+categories = ["parsing", "mathematics", "development-tools"]
+authors = ["Lynx Language Team"]
+exclude = [
+    "vscode-lynx-extension/",
+    ".claude/",
+    "CLAUDE.md"
+]
+
+[dependencies]
+nom = "7.1"
+thiserror = "1.0"
+tower-lsp = "0.20"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "example"
+path = "src/bin/example.rs"
+
+[[bin]]
+name = "lynx-lsp"
+path = "src/bin/lsp_server.rs"
+
+[[bin]]
+name = "test-resilient-parser"
+path = "src/bin/test_resilient_parser.rs"

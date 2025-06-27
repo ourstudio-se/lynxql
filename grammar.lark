@@ -1,0 +1,201 @@
+// Lark grammar for Lynx language
+// Updated for the new language syntax
+
+start: statement*
+
+statement: type_decl
+         | enum_decl
+         | instance_decl
+         | assignment
+         | solve_call
+
+//////////////////////////
+// Comments
+//////////////////////////
+
+SINGLE_LINE_COMMENT: "//" /[^\r\n]*/
+MULTI_LINE_COMMENT: "/*" /(.|\n)*?/ "*/"
+
+%ignore SINGLE_LINE_COMMENT
+%ignore MULTI_LINE_COMMENT
+
+//////////////////////////
+// Type Declarations
+//////////////////////////
+
+type_decl: "type" TYPE_NAME ":" base_type ["{" field_decl_list "}"]
+
+//////////////////////////
+// Enum Declarations
+//////////////////////////
+
+enum_decl: "enum" TYPE_NAME "{" enum_variant_list "}"
+
+enum_variant_list: (enum_variant (",")?)*
+
+enum_variant: TYPE_NAME ["=" INT]
+
+// Base types can be primitives or logic types
+base_type: primitive_type | logic_type
+
+primitive_type: "int" | "float" | "string" | "bool" | TYPE_NAME
+
+logic_type: "All" | "Any" | "Not" 
+          | "Exactly" "<" INT ">"
+          | "AtLeast" "<" INT ">"
+          | "AtMost" "<" INT ">"
+
+field_decl_list: (field_decl (",")?)*
+
+field_decl: ID ":" type_ref ["?" ] ["=" expr]
+
+// Type references can include collection types and logic operators
+type_ref: primitive_type
+        | logic_type "[" type_ref "]"
+        | TYPE_NAME
+
+//////////////////////////
+// Instance Declarations  
+//////////////////////////
+
+// New syntax: TypeName instance_name { field: value, ... }
+instance_decl: TYPE_NAME ID "{" field_assign_list "}"
+
+field_assign_list: (field_assign (",")?)*
+
+field_assign: ID ":" expr
+
+//////////////////////////
+// Assignments
+//////////////////////////
+
+assignment: ID "=" expr
+
+//////////////////////////
+// Expressions
+//////////////////////////
+
+?expr: literal
+     | ID
+     | global_context
+     | enum_access
+     | lambda_expr
+     | match_expr
+     | builtin_call
+     | logic_expr
+     | object_literal
+     | list_literal
+     | set_literal
+     | field_access
+
+// Global context symbol
+global_context: "*"
+
+// Enum value access (e.g., Material.Steel)
+enum_access: TYPE_NAME "." TYPE_NAME
+
+// Object literals for inline construction
+object_literal: TYPE_NAME "{" field_assign_list "}"
+
+// List literals
+list_literal: "[" [expr ("," expr)*] "]"
+
+// Set literals for logic collections
+set_literal: "{" [expr ("," expr)*] "}"
+
+// Field access (e.g., c.age, c.toolbox.hammers.cost)
+field_access: ID ("." ID)+
+
+//////////////////////////
+// Literals
+//////////////////////////
+
+literal: STRING | INT | FLOAT | "true" | "false"
+
+//////////////////////////
+// Lambda Expressions
+//////////////////////////
+
+lambda_expr: "(" [ID] ")" "->" expr
+           | "(" ID ":" TYPE_NAME ")" "->" expr
+
+//////////////////////////
+// Match Expressions
+//////////////////////////
+
+match_expr: "match" "(" "{" match_case_list "}" ")"
+
+match_case_list: (match_case (",")?)*
+
+match_case: logic_expr ":" expr
+          | "_" ":" expr
+
+//////////////////////////
+// Logic Expressions
+//////////////////////////
+
+logic_expr: logic_op ["{" expr_list "}"]
+          | logic_op "(" expr_list ")"
+
+logic_op: "All" | "Any" | "Not"
+        | "Exactly" "<" INT ">"
+        | "AtLeast" "<" INT ">"
+        | "AtMost" "<" INT ">"
+
+expr_list: [expr ("," expr)*]
+
+//////////////////////////
+// Built-in Function Calls
+//////////////////////////
+
+builtin_call: builtin_name "(" [arg_list] ")"
+
+builtin_name: "solve" | "find" | "sum" | "first" | "match" | "propagate"
+
+arg_list: (expr | named_arg) ("," (expr | named_arg))*
+
+named_arg: ID "=" expr
+
+//////////////////////////
+// Solve Calls
+//////////////////////////
+
+solve_call: ID "=" "solve" "(" expr "," "{" objective_list "}" ["," "{" constraint_list "}"] ")"
+
+objective_list: (objective_item (",")?)*
+objective_item: ID ":" FLOAT
+
+constraint_list: (constraint_item (",")?)*
+constraint_item: logic_expr
+
+//////////////////////////
+// Arithmetic Expressions
+//////////////////////////
+
+// Support for arithmetic in computed properties
+?arith_expr: arith_term
+           | arith_expr "+" arith_term
+           | arith_expr "-" arith_term
+
+?arith_term: arith_factor
+           | arith_term "*" arith_factor  // Limited multiplication for ILP compatibility
+           
+?arith_factor: literal
+             | ID
+             | field_access
+             | builtin_call
+             | "(" arith_expr ")"
+
+//////////////////////////
+// Tokens
+//////////////////////////
+
+%import common.CNAME -> ID
+%import common.INT
+%import common.FLOAT
+%import common.ESCAPED_STRING -> STRING
+%import common.WS
+
+%ignore WS
+
+TYPE_NAME: /[A-Z][a-zA-Z0-9_]*/
