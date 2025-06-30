@@ -114,6 +114,7 @@ pub enum BaseType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveType {
+    Bound(i32, i32),
     Int,
     Float,
     String,
@@ -372,6 +373,10 @@ fn base_type(input: &str) -> IResult<&str, BaseType> {
 
 fn primitive_type(input: &str) -> IResult<&str, PrimitiveType> {
     alt((
+        map(
+            tuple((int_literal, ws(tag("..")), int_literal)),
+            |(from, _, to)| PrimitiveType::Bound(from as i32, to as i32),
+        ),
         value(PrimitiveType::Int, tag("int")),
         value(PrimitiveType::Float, tag("float")),
         value(PrimitiveType::String, tag("string")),
@@ -886,29 +891,35 @@ fn enum_variant_list(input: &str) -> IResult<&str, Vec<EnumVariant>> {
             break;
         }
     }
-    
+
     Ok((remaining, variants))
 }
 
 fn enum_variant(input: &str) -> IResult<&str, EnumVariant> {
     let (input, name) = ws(type_name)(input)?;
     let (input, value) = opt(preceded(ws(char('=')), ws(int_literal)))(input)?;
-    
-    Ok((input, EnumVariant {
-        name: name.to_string(),
-        value,
-    }))
+
+    Ok((
+        input,
+        EnumVariant {
+            name: name.to_string(),
+            value,
+        },
+    ))
 }
 
 fn enum_access(input: &str) -> IResult<&str, EnumAccess> {
     let (input, enum_name) = type_name(input)?;
     let (input, _) = char('.')(input)?;
     let (input, variant_name) = type_name(input)?;
-    
-    Ok((input, EnumAccess {
-        enum_name: enum_name.to_string(),
-        variant_name: variant_name.to_string(),
-    }))
+
+    Ok((
+        input,
+        EnumAccess {
+            enum_name: enum_name.to_string(),
+            variant_name: variant_name.to_string(),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -916,10 +927,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_bound_type_decl() {
+        let input = "type Size: 0..1";
+        let result = parse_program(input).unwrap();
+
+        assert_eq!(result.statements.len(), 1);
+        match &result.statements[0] {
+            Statement::TypeDecl(type_decl) => {
+                assert_eq!(type_decl.name, "Size");
+                assert_eq!(
+                    type_decl.base_type,
+                    BaseType::Primitive(PrimitiveType::Bound(0, 1))
+                );
+                assert_eq!(type_decl.fields.len(), 0);
+            }
+            _ => panic!("Expected type declaration"),
+        }
+    }
+
+    #[test]
     fn test_simple_type_decl() {
         let input = "type Size: int";
         let result = parse_program(input).unwrap();
-        
+
         assert_eq!(result.statements.len(), 1);
         match &result.statements[0] {
             Statement::TypeDecl(type_decl) => {
