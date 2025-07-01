@@ -45,6 +45,7 @@ impl Type {
     pub fn to_string(&self) -> String {
         match self {
             Type::Primitive(p) => match p {
+                PrimitiveType::Bound(from, to) => format!("{}..{}", from, to),
                 PrimitiveType::Int => "int".to_string(),
                 PrimitiveType::Float => "float".to_string(),
                 PrimitiveType::String => "string".to_string(),
