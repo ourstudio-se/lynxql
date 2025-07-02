@@ -44,8 +44,13 @@ result = solve(hammer1, { hammer1: 1.0 })
                 println!("  {}. {}", i + 1, match stmt {
                     lynxql::Statement::TypeDecl(t) => format!("Type declaration: {}", t.name),
                     lynxql::Statement::EnumDecl(e) => format!("Enum declaration: {}", e.name),
-                    lynxql::Statement::InstanceDecl(inst) => format!("Instance declaration: {} : {}", inst.instance_name, inst.type_name),
-                    lynxql::Statement::Assignment(a) => format!("Assignment: {}", a.name),
+                    lynxql::Statement::Assignment(a) => {
+                        if a.type_name.is_empty() {
+                            format!("Assignment: {}", a.name)
+                        } else {
+                            format!("Instance declaration: {} : {}", a.name, a.type_name)
+                        }
+                    },
                     lynxql::Statement::SolveCall(_) => "Solve call".to_string(),
                 });
             }

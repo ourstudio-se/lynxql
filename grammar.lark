@@ -5,7 +5,6 @@ start: statement*
 
 statement: type_decl
          | enum_decl
-         | instance_decl
          | assignment
          | solve_call
 
@@ -58,18 +57,15 @@ type_ref: primitive_type
 // Instance Declarations  
 //////////////////////////
 
-// New syntax: TypeName instance_name { field: value, ... }
-instance_decl: TYPE_NAME ID "{" field_assign_list "}"
+// All assignments must be typed: TypeName name = expr
+// Object literals: TypeName name = { field: value, ... }
+assignment: (TYPE_NAME | primitive_type_name) ID "=" expr
+
+primitive_type_name: "int" | "float" | "string" | "bool"
 
 field_assign_list: (field_assign (",")?)*
 
 field_assign: ID ":" expr
-
-//////////////////////////
-// Assignments
-//////////////////////////
-
-assignment: ID "=" expr
 
 //////////////////////////
 // Expressions
@@ -84,6 +80,7 @@ assignment: ID "=" expr
      | builtin_call
      | logic_expr
      | object_literal
+     | anonymous_object_literal
      | list_literal
      | set_literal
      | field_access
@@ -103,6 +100,9 @@ list_literal: "[" [expr ("," expr)*] "]"
 // Set literals for logic collections
 set_literal: "{" [expr ("," expr)*] "}"
 
+// Anonymous object literal (used in assignments)
+anonymous_object_literal: "{" field_assign_list "}"
+
 // Field access (e.g., c.age, c.toolbox.hammers.cost)
 field_access: ID ("." ID)+
 
@@ -117,13 +117,13 @@ literal: STRING | INT | FLOAT | "true" | "false"
 //////////////////////////
 
 lambda_expr: "(" [ID] ")" "->" expr
-           | "(" ID ":" TYPE_NAME ")" "->" expr
+           | "(" TYPE_NAME ID ")" "->" expr
 
 //////////////////////////
 // Match Expressions
 //////////////////////////
 
-match_expr: "match" "(" "{" match_case_list "}" ")"
+match_expr: "match" "{" match_case_list "}"
 
 match_case_list: (match_case (",")?)*
 
@@ -150,7 +150,7 @@ expr_list: [expr ("," expr)*]
 
 builtin_call: builtin_name "(" [arg_list] ")"
 
-builtin_name: "solve" | "find" | "sum" | "first" | "match" | "propagate"
+builtin_name: "solve" | "find" | "sum" | "first" | "propagate"
 
 arg_list: (expr | named_arg) ("," (expr | named_arg))*
 

@@ -180,12 +180,27 @@ impl LynxLanguageServer {
         // Search for the term in the text and return its position
         let lines: Vec<&str> = text.lines().collect();
         
+        // First try to find the exact term
         for (line_idx, line) in lines.iter().enumerate() {
             if let Some(col_idx) = line.find(term) {
                 return Range {
                     start: Position::new(line_idx as u32, col_idx as u32),
                     end: Position::new(line_idx as u32, (col_idx + term.len()) as u32),
                 };
+            }
+        }
+        
+        // If the exact term isn't found, try to find just the variant name
+        // For "Material.InvalidVariant", also try "InvalidVariant"
+        if let Some(dot_pos) = term.rfind('.') {
+            let variant_only = &term[dot_pos + 1..];
+            for (line_idx, line) in lines.iter().enumerate() {
+                if let Some(col_idx) = line.find(variant_only) {
+                    return Range {
+                        start: Position::new(line_idx as u32, col_idx as u32),
+                        end: Position::new(line_idx as u32, (col_idx + variant_only.len()) as u32),
+                    };
+                }
             }
         }
         

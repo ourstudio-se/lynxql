@@ -98,9 +98,8 @@ fn parse_statement_resilient(input: &str) -> IResult<&str, Statement> {
     alt((
         map(type_decl_resilient, Statement::TypeDecl),
         map(enum_decl_resilient, Statement::EnumDecl),
-        map(instance_decl_resilient, Statement::InstanceDecl),
+        map(instance_or_assignment_resilient, Statement::Assignment),
         map(solve_call_resilient, Statement::SolveCall),
-        map(assignment_resilient, Statement::Assignment),
     ))(input)
 }
 
@@ -144,18 +143,50 @@ fn enum_decl_resilient(input: &str) -> IResult<&str, EnumDecl> {
     }))
 }
 
-fn instance_decl_resilient(input: &str) -> IResult<&str, InstanceDecl> {
-    let (input, type_name) = ws(type_name)(input)?;
-    let (input, instance_name) = ws(identifier)(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, fields) = field_assign_list_resilient(input)?;
-    let (input, _) = ws(char('}'))(input)?;
+fn instance_or_assignment_resilient(input: &str) -> IResult<&str, Assignment> {
+    // Try to parse typed assignment: TypeName instance_name = expr
+    if let Ok((remaining, type_name)) = ws(type_name)(input) {
+        if let Ok((remaining, instance_name)) = ws(identifier)(remaining) {
+            if let Ok((remaining, _)) = ws(char('='))(remaining) {
+                // This is a typed assignment with equals: TypeName name = expr
+                let (input, expr) = ws(expr_resilient)(remaining)?;
+                return Ok((input, Assignment {
+                    type_name: type_name.to_string(),
+                    name: instance_name.to_string(),
+                    value: expr,
+                }));
+            } else if let Ok((remaining, _)) = ws(char('{'))(remaining) {
+                // This is an instance declaration without equals: TypeName name { ... }
+                let (input, fields) = field_assign_list_resilient(remaining)?;
+                let (input, _) = ws(char('}'))(input)?;
+                
+                return Ok((input, Assignment {
+                    type_name: type_name.to_string(),
+                    name: instance_name.to_string(),
+                    value: Expr::AnonymousObjectLiteral(fields),
+                }));
+            }
+        }
+    }
     
-    Ok((input, InstanceDecl {
-        type_name: type_name.to_string(),
-        instance_name: instance_name.to_string(),
-        fields,
-    }))
+    // Try primitive type assignments: int/float/string/bool name = expr
+    if let Ok((remaining, prim_type)) = ws(alt((
+        tag("int"), tag("float"), tag("string"), tag("bool")
+    )))(input) {
+        if let Ok((remaining, var_name)) = ws(identifier)(remaining) {
+            if let Ok((remaining, _)) = ws(char('='))(remaining) {
+                let (input, expr) = ws(expr_resilient)(remaining)?;
+                return Ok((input, Assignment {
+                    type_name: prim_type.to_string(),
+                    name: var_name.to_string(),
+                    value: expr,
+                }));
+            }
+        }
+    }
+    
+    // Fall back to regular assignment (name = expr)
+    assignment_resilient(input)
 }
 
 fn solve_call_resilient(input: &str) -> IResult<&str, SolveCall> {
@@ -169,6 +200,7 @@ fn assignment_resilient(input: &str) -> IResult<&str, Assignment> {
     let (input, value) = ws(expr_resilient)(input)?;
     
     Ok((input, Assignment {
+        type_name: String::new(), // Empty type_name indicates regular assignment
         name: name.to_string(),
         value,
     }))
@@ -185,7 +217,7 @@ fn field_decl_list_resilient(input: &str) -> IResult<&str, Vec<FieldDecl>> {
     
     // Parse fields with error recovery
     while !remaining.is_empty() && !remaining.starts_with('}') {
-        match ws(field_decl)(remaining) {
+        match field_decl_resilient(remaining) {
             Ok((new_input, field)) => {
                 fields.push(field);
                 remaining = new_input;
@@ -203,6 +235,34 @@ fn field_decl_list_resilient(input: &str) -> IResult<&str, Vec<FieldDecl>> {
     }
     
     Ok((remaining, fields))
+}
+
+fn field_decl_resilient(input: &str) -> IResult<&str, FieldDecl> {
+    let (input, name) = ws(identifier)(input)?;
+    let (input, _) = ws(char(':'))(input)?;
+    let (input, type_ref) = ws(type_ref)(input)?;
+    let (input, is_optional) = opt(ws(char('?')))(input)?;
+    
+    // Handle default value with resilient expression parsing
+    let (input, default) = if let Ok((new_input, _)) = ws(char('='))(input) {
+        match expr_resilient(new_input) {
+            Ok((new_input, expr)) => (new_input, Some(expr)),
+            Err(_) => {
+                // If expression parsing fails, skip to next comma or end
+                let skipped_input = skip_to_next_field_or_end(new_input);
+                (skipped_input, None)
+            }
+        }
+    } else {
+        (input, None)
+    };
+    
+    Ok((input, FieldDecl {
+        name: name.to_string(),
+        type_ref,
+        is_optional: is_optional.is_some(),
+        default,
+    }))
 }
 
 fn field_assign_list_resilient(input: &str) -> IResult<&str, Vec<FieldAssign>> {
@@ -343,13 +403,38 @@ fn skip_to_closing_brace(input: &str) -> IResult<&str, ()> {
 }
 
 fn skip_to_next_field_or_end(input: &str) -> &str {
-    // Skip to next comma or closing brace
+    // Skip to next comma or closing brace, handling nested braces and parentheses
     let mut pos = 0;
+    let mut brace_depth = 0;
+    let mut paren_depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    
     for ch in input.chars() {
-        match ch {
-            ',' | '}' => return &input[pos..],
-            _ => pos += ch.len_utf8(),
+        if escape_next {
+            escape_next = false;
+            pos += ch.len_utf8();
+            continue;
         }
+        
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => brace_depth += 1,
+            '}' if !in_string => {
+                if brace_depth == 0 {
+                    return &input[pos..];
+                }
+                brace_depth -= 1;
+            },
+            '(' if !in_string => paren_depth += 1,
+            ')' if !in_string => paren_depth -= 1,
+            ',' if !in_string && brace_depth == 0 && paren_depth == 0 => {
+                return &input[pos..];
+            },
+            _ => {}
+        }
+        pos += ch.len_utf8();
     }
     ""
 }

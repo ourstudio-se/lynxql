@@ -48,7 +48,7 @@ use nom::{
     character::complete::{char, digit1, alpha1, alphanumeric1, line_ending, not_line_ending},
     combinator::{opt, map, recognize, value},
     multi::{many0, separated_list0, separated_list1},
-    sequence::{delimited, preceded, tuple, pair},
+    sequence::{delimited, preceded, tuple, pair, terminated},
     IResult,
 };
 use thiserror::Error;
@@ -82,7 +82,6 @@ pub struct Program {
 pub enum Statement {
     TypeDecl(TypeDecl),
     EnumDecl(EnumDecl),
-    InstanceDecl(InstanceDecl),
     Assignment(Assignment),
     SolveCall(SolveCall),
 }
@@ -163,6 +162,7 @@ pub struct FieldAssign {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
+    pub type_name: String,
     pub name: String,
     pub value: Expr,
 }
@@ -178,6 +178,7 @@ pub enum Expr {
     BuiltinCall(BuiltinCall),
     Logic(LogicExpr),
     ObjectLiteral(ObjectLiteral),
+    AnonymousObjectLiteral(Vec<FieldAssign>),
     ListLiteral(Vec<Expr>),
     SetLiteral(Vec<Expr>),
     FieldAccess(FieldAccess),
@@ -240,7 +241,7 @@ pub struct MatchExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchCase {
-    Logic { pattern: LogicExpr, value: Expr },
+    Pattern { pattern: Expr, value: Expr },
     Wildcard { value: Expr },
 }
 
@@ -340,9 +341,8 @@ fn statement(input: &str) -> IResult<&str, Statement> {
     alt((
         map(type_decl, Statement::TypeDecl),
         map(enum_decl, Statement::EnumDecl),
-        map(instance_decl, Statement::InstanceDecl),
-        map(solve_call, Statement::SolveCall),
         map(assignment, Statement::Assignment),
+        map(solve_call, Statement::SolveCall),
     ))(input)
 }
 
@@ -463,19 +463,6 @@ fn type_ref(input: &str) -> IResult<&str, TypeRef> {
 }
 
 // New instance declaration syntax: TypeName instance_name { ... }
-fn instance_decl(input: &str) -> IResult<&str, InstanceDecl> {
-    let (input, type_name) = ws(type_name)(input)?;
-    let (input, instance_name) = ws(identifier)(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, fields) = field_assign_list(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    
-    Ok((input, InstanceDecl {
-        type_name: type_name.to_string(),
-        instance_name: instance_name.to_string(),
-        fields,
-    }))
-}
 
 fn field_assign_list(input: &str) -> IResult<&str, Vec<FieldAssign>> {
     separated_list0(ws(char(',')), field_assign)(input)
@@ -493,14 +480,46 @@ fn field_assign(input: &str) -> IResult<&str, FieldAssign> {
 }
 
 fn assignment(input: &str) -> IResult<&str, Assignment> {
+    alt((
+        instance_decl_assignment,
+        regular_assignment,
+    ))(input)
+}
+
+fn instance_decl_assignment(input: &str) -> IResult<&str, Assignment> {
+    let (input, type_name) = ws(alt((type_name, primitive_type_name)))(input)?;
+    let (input, instance_name) = ws(identifier)(input)?;
+    let (input, _) = ws(char('{'))(input)?;
+    let (input, fields) = field_assign_list(input)?;
+    let (input, _) = ws(char('}'))(input)?;
+    
+    Ok((input, Assignment {
+        type_name: type_name.to_string(),
+        name: instance_name.to_string(),
+        value: Expr::AnonymousObjectLiteral(fields),
+    }))
+}
+
+fn regular_assignment(input: &str) -> IResult<&str, Assignment> {
+    let (input, type_name) = ws(alt((type_name, primitive_type_name)))(input)?;
     let (input, name) = ws(identifier)(input)?;
     let (input, _) = ws(char('='))(input)?;
     let (input, value) = ws(expr)(input)?;
     
     Ok((input, Assignment {
+        type_name: type_name.to_string(),
         name: name.to_string(),
         value,
     }))
+}
+
+fn primitive_type_name(input: &str) -> IResult<&str, &str> {
+    alt((
+        tag("int"),
+        tag("float"),
+        tag("string"),
+        tag("bool"),
+    ))(input)
 }
 
 fn expr(input: &str) -> IResult<&str, Expr> {
@@ -581,6 +600,7 @@ fn primary_expr(input: &str) -> IResult<&str, Expr> {
         map(builtin_call, Expr::BuiltinCall),
         map(logic_expr, Expr::Logic),
         map(object_literal, Expr::ObjectLiteral),
+        map(anonymous_object_literal, Expr::AnonymousObjectLiteral),
         map(list_literal, Expr::ListLiteral),
         map(set_literal, Expr::SetLiteral),
         map(field_access, Expr::FieldAccess),
@@ -635,18 +655,17 @@ fn lambda_expr(input: &str) -> IResult<&str, LambdaExpr> {
                 body: Box::new(body),
             }
         ),
-        // Typed lambda: (param: Type) -> expr
+        // Typed lambda: (Type param) -> expr
         map(
             tuple((
                 ws(char('(')),
-                ws(identifier),
-                ws(char(':')),
                 ws(type_name),
+                ws(identifier),
                 ws(char(')')),
                 ws(tag("->")),
                 ws(expr)
             )),
-            |(_, param, _, param_type, _, _, body)| LambdaExpr {
+            |(_, param_type, param, _, _, body)| LambdaExpr {
                 param: Some(param.to_string()),
                 param_type: Some(param_type.to_string()),
                 body: Box::new(body),
@@ -657,11 +676,12 @@ fn lambda_expr(input: &str) -> IResult<&str, LambdaExpr> {
 
 fn match_expr(input: &str) -> IResult<&str, MatchExpr> {
     let (input, _) = ws(tag("match"))(input)?;
-    let (input, _) = ws(char('('))(input)?;
     let (input, _) = ws(char('{'))(input)?;
-    let (input, cases) = separated_list0(ws(char(',')), match_case)(input)?;
+    let (input, cases) = terminated(
+        separated_list0(ws(char(',')), match_case),
+        opt(ws(char(',')))
+    )(input)?;
     let (input, _) = ws(char('}'))(input)?;
-    let (input, _) = ws(char(')'))(input)?;
     
     Ok((input, MatchExpr {
         cases,
@@ -671,12 +691,12 @@ fn match_expr(input: &str) -> IResult<&str, MatchExpr> {
 fn match_case(input: &str) -> IResult<&str, MatchCase> {
     alt((
         map(
-            tuple((logic_expr, ws(char(':')), ws(expr))),
-            |(pattern, _, value)| MatchCase::Logic { pattern, value },
-        ),
-        map(
             tuple((ws(char('_')), ws(char(':')), ws(expr))),
             |(_, _, value)| MatchCase::Wildcard { value },
+        ),
+        map(
+            tuple((expr, ws(char(':')), ws(expr))),
+            |(pattern, _, value)| MatchCase::Pattern { pattern, value },
         ),
     ))(input)
 }
@@ -699,7 +719,6 @@ fn builtin_name(input: &str) -> IResult<&str, &str> {
         tag("find"),
         tag("sum"),
         tag("first"),
-        tag("match"),
         tag("propagate"),
     ))(input)
 }
@@ -767,6 +786,14 @@ fn object_literal(input: &str) -> IResult<&str, ObjectLiteral> {
         type_name: type_name.to_string(),
         fields,
     }))
+}
+
+fn anonymous_object_literal(input: &str) -> IResult<&str, Vec<FieldAssign>> {
+    let (input, _) = ws(char('{'))(input)?;
+    let (input, fields) = field_assign_list(input)?;
+    let (input, _) = ws(char('}'))(input)?;
+    
+    Ok((input, fields))
 }
 
 fn list_literal(input: &str) -> IResult<&str, Vec<Expr>> {
@@ -992,12 +1019,17 @@ mod tests {
         
         assert_eq!(result.statements.len(), 1);
         match &result.statements[0] {
-            Statement::InstanceDecl(instance) => {
-                assert_eq!(instance.type_name, "Hammer");
-                assert_eq!(instance.instance_name, "hammer1");
-                assert_eq!(instance.fields.len(), 2);
+            Statement::Assignment(assignment) => {
+                assert_eq!(assignment.type_name, "Hammer");
+                assert_eq!(assignment.name, "hammer1");
+                match &assignment.value {
+                    Expr::AnonymousObjectLiteral(fields) => {
+                        assert_eq!(fields.len(), 2);
+                    }
+                    _ => panic!("Expected anonymous object literal for instance declaration"),
+                }
             }
-            _ => panic!("Expected instance declaration"),
+            _ => panic!("Expected assignment (instance declaration)"),
         }
     }
 
@@ -1039,7 +1071,7 @@ mod tests {
 
     #[test]
     fn test_field_access() {
-        let input = "test = c.toolbox.hammers.cost";
+        let input = "float test = c.toolbox.hammers.cost";
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);
@@ -1076,7 +1108,7 @@ mod tests {
     #[test]
     fn test_complex_lambda_with_comparison() {
         let input = r#"type Test: All {
-            workable: bool = (c: Test) -> c.age >= 18
+            workable: bool = (Test c) -> c.age >= 18
         }"#;
         let result = parse_program(input).unwrap();
         
@@ -1106,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_builtin_call_with_lambda() {
-        let input = r#"test = find((h: Hammer) -> h.size >= 8)"#;
+        let input = r#"Hammer test = find((Hammer h) -> h.size >= 8)"#;
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);
@@ -1132,7 +1164,7 @@ mod tests {
 
     #[test]
     fn test_global_context_symbol() {
-        let input = "test = *";
+        let input = "Context test = *";
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);
@@ -1151,7 +1183,7 @@ mod tests {
 
     #[test] 
     fn test_find_with_global_context() {
-        let input = r#"result = find(*, (h: Hammer) -> h.size >= 8)"#;
+        let input = r#"Hammer result = find(*, (Hammer h) -> h.size >= 8)"#;
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);
@@ -1208,9 +1240,9 @@ mod tests {
 
     #[test]
     fn test_new_match_syntax() {
-        let input = r#"test = match({
+        let input = r#"int test = match {
             _: 5
-        })"#;
+        }"#;
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);
@@ -1238,9 +1270,9 @@ mod tests {
 
     #[test]
     fn test_match_in_lambda() {
-        let input = r#"weight = (h: Hammer) -> match({
+        let input = r#"int weight = (Hammer h) -> match {
             _: 5
-        })"#;
+        }"#;
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);
@@ -1314,7 +1346,7 @@ mod tests {
 
     #[test]
     fn test_enum_access() {
-        let input = "test = Material.Steel";
+        let input = "Material test = Material.Steel";
         let result = parse_program(input).unwrap();
         
         assert_eq!(result.statements.len(), 1);

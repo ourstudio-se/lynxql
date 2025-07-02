@@ -232,11 +232,7 @@ impl TypeChecker {
         // Third pass: check instances, assignments, and solve calls
         for statement in &program.statements {
             match statement {
-                Statement::InstanceDecl(instance_decl) => {
-                    if let Err(err) = self.check_instance_decl(instance_decl) {
-                        errors.push(err);
-                    }
-                }
+                // InstanceDecl is now handled through Assignment
                 Statement::Assignment(assignment) => {
                     if let Err(err) = self.check_assignment(assignment) {
                         errors.push(err);
@@ -343,58 +339,108 @@ impl TypeChecker {
         })
     }
     
-    fn check_instance_decl(&mut self, instance_decl: &InstanceDecl) -> Result<(), TypeCheckError> {
-        // Clone the type declaration to avoid borrowing conflicts
-        let type_decl = self.env.get_type(&instance_decl.type_name)
-            .ok_or_else(|| TypeCheckError::UndefinedType(instance_decl.type_name.clone()))?
-            .clone();
-        
-        // Check that all required fields are provided
-        let mut provided_fields = std::collections::HashSet::new();
-        for field_assign in &instance_decl.fields {
-            provided_fields.insert(&field_assign.name);
-            
-            // Find the field in the type declaration
-            let field_decl = type_decl.fields.iter()
-                .find(|f| f.name == field_assign.name)
-                .ok_or_else(|| TypeCheckError::FieldNotFound(
-                    field_assign.name.clone(),
-                    instance_decl.type_name.clone()
-                ))?;
-            
-            // Check that the assigned value matches the field type
-            let expr_type = self.infer_expr_type(&field_assign.value)?;
-            if !self.types_compatible(&field_decl.field_type, &expr_type) {
-                return Err(TypeCheckError::TypeMismatch {
-                    expected: field_decl.field_type.to_string(),
-                    found: expr_type.to_string(),
-                });
-            }
-        }
-        
-        // Check for missing required fields
-        for field in &type_decl.fields {
-            if !field.is_optional && field.default.is_none() && !provided_fields.contains(&field.name) {
-                return Err(TypeCheckError::MissingRequiredField {
-                    field: field.name.clone(),
-                    type_name: instance_decl.type_name.clone(),
-                });
-            }
-        }
-        
-        // Add instance to environment
-        self.env.add_instance(
-            instance_decl.instance_name.clone(),
-            Type::Named(instance_decl.type_name.clone())
-        );
-        
-        Ok(())
-    }
     
     fn check_assignment(&mut self, assignment: &Assignment) -> Result<(), TypeCheckError> {
-        let expr_type = self.infer_expr_type(&assignment.value)?;
-        self.env.add_variable(assignment.name.clone(), expr_type);
-        Ok(())
+        // If the assignment has a type_name, it could be either a primitive typed assignment,
+        // an enum typed assignment, or an instance declaration for a user-defined type
+        if !assignment.type_name.is_empty() {
+            // Check if this is a primitive type (int, float, string, bool)
+            let is_primitive = matches!(assignment.type_name.as_str(), "int" | "float" | "string" | "bool");
+            
+            // Check if this is an enum type
+            let is_enum = self.env.enums.contains_key(&assignment.type_name);
+            
+            if is_primitive || is_enum {
+                // This is a typed variable assignment: type var_name = expr
+                let expected_type = self.resolve_type_name(&assignment.type_name)?;
+                let expr_type = self.infer_expr_type(&assignment.value)?;
+                
+                if !self.types_compatible(&expected_type, &expr_type) {
+                    return Err(TypeCheckError::TypeMismatch {
+                        expected: expected_type.to_string(),
+                        found: expr_type.to_string(),
+                    });
+                }
+                
+                self.env.add_variable(assignment.name.clone(), expected_type);
+                Ok(())
+            } else {
+                // This is an instance declaration: TypeName instance_name { fields... }
+                self.check_instance_assignment(assignment)
+            }
+        } else {
+            // Regular variable assignment: var = expr (shouldn't happen with new syntax)
+            let expr_type = self.infer_expr_type(&assignment.value)?;
+            self.env.add_variable(assignment.name.clone(), expr_type);
+            Ok(())
+        }
+    }
+    
+    fn check_instance_assignment(&mut self, assignment: &Assignment) -> Result<(), TypeCheckError> {
+        // Get the type declaration
+        let type_decl = self.env.get_type(&assignment.type_name)
+            .ok_or_else(|| TypeCheckError::UndefinedType(assignment.type_name.clone()))?
+            .clone();
+            
+        // Check the field assignments
+        match &assignment.value {
+            Expr::AnonymousObjectLiteral(fields) => {
+                // Check that all required fields are provided
+                let mut provided_fields = std::collections::HashSet::new();
+                for field_assign in fields {
+                    provided_fields.insert(&field_assign.name);
+                    
+                    // Find the field in the type declaration
+                    let field_decl = type_decl.fields.iter()
+                        .find(|f| f.name == field_assign.name)
+                        .ok_or_else(|| TypeCheckError::FieldNotFound(
+                            field_assign.name.clone(),
+                            assignment.type_name.clone()
+                        ))?;
+                    
+                    // Check that the assigned value matches the field type
+                    let expr_type = self.infer_expr_type(&field_assign.value)?;
+                    if !self.types_compatible(&field_decl.field_type, &expr_type) {
+                        return Err(TypeCheckError::TypeMismatch {
+                            expected: field_decl.field_type.to_string(),
+                            found: expr_type.to_string(),
+                        });
+                    }
+                }
+                
+                // Check for missing required fields
+                for field in &type_decl.fields {
+                    if !field.is_optional && field.default.is_none() && !provided_fields.contains(&field.name) {
+                        return Err(TypeCheckError::MissingRequiredField {
+                            field: field.name.clone(),
+                            type_name: assignment.type_name.clone(),
+                        });
+                    }
+                }
+                
+                // Add instance to environment
+                self.env.add_instance(
+                    assignment.name.clone(),
+                    Type::Named(assignment.type_name.clone())
+                );
+                
+                Ok(())
+            }
+            _ => {
+                // For other expression types, just check compatibility with the type
+                let expr_type = self.infer_expr_type(&assignment.value)?;
+                let expected_type = Type::Named(assignment.type_name.clone());
+                if !self.types_compatible(&expected_type, &expr_type) {
+                    return Err(TypeCheckError::TypeMismatch {
+                        expected: expected_type.to_string(),
+                        found: expr_type.to_string(),
+                    });
+                }
+                
+                self.env.add_instance(assignment.name.clone(), expected_type);
+                Ok(())
+            }
+        }
     }
     
     fn check_solve_call(&mut self, solve_call: &SolveCall) -> Result<(), TypeCheckError> {
@@ -487,6 +533,7 @@ impl TypeChecker {
             Expr::FieldAccess(field_access) => self.infer_field_access_type(field_access),
             Expr::ArithExpr(arith_expr) => self.infer_arith_expr_type(arith_expr),
             Expr::BinaryOp(binary_op) => self.infer_binary_op_type(binary_op),
+            Expr::AnonymousObjectLiteral(fields) => self.infer_anonymous_object_literal_type(fields),
         }
     }
     
@@ -529,12 +576,25 @@ impl TypeChecker {
         }
         
         let first_case_type = match &match_expr.cases[0] {
-            MatchCase::Logic { value, .. } => self.infer_expr_type(value)?,
+            MatchCase::Pattern { value, .. } => self.infer_expr_type(value)?,
             MatchCase::Wildcard { value } => self.infer_expr_type(value)?,
         };
         
-        // For simplicity, assume all cases return the same type
-        // In a more complete implementation, we would find the common supertype
+        // Check that all match arms return the same type
+        for (i, case) in match_expr.cases.iter().enumerate().skip(1) {
+            let case_type = match case {
+                MatchCase::Pattern { value, .. } => self.infer_expr_type(value)?,
+                MatchCase::Wildcard { value } => self.infer_expr_type(value)?,
+            };
+            
+            if !self.types_compatible(&first_case_type, &case_type) {
+                return Err(TypeCheckError::TypeError(format!(
+                    "Match arm {} returns type {:?}, but first arm returns {:?}",
+                    i, case_type, first_case_type
+                )));
+            }
+        }
+        
         Ok(first_case_type)
     }
     
@@ -627,6 +687,19 @@ impl TypeChecker {
         }
         
         Ok(Type::Named(obj_literal.type_name.clone()))
+    }
+    
+    fn infer_anonymous_object_literal_type(&mut self, fields: &[FieldAssign]) -> Result<Type, TypeCheckError> {
+        // For anonymous object literals, we can't determine a specific type
+        // without more context, so we return Unknown type
+        // In a more sophisticated implementation, we might infer a structural type
+        
+        // Still validate that all field expressions are well-typed
+        for field_assign in fields {
+            let _expr_type = self.infer_expr_type(&field_assign.value)?;
+        }
+        
+        Ok(Type::Unknown)
     }
     
     fn infer_field_access_type(&mut self, field_access: &FieldAccess) -> Result<Type, TypeCheckError> {
@@ -961,7 +1034,7 @@ mod tests {
             Wood
         }
         
-        test = Material.Plastic  // Plastic is not a valid variant
+        Material test = Material.Plastic  // Plastic is not a valid variant
         "#;
         let program = parse_program(input).unwrap();
         let result = typecheck_program(&program);
@@ -1005,7 +1078,7 @@ mod tests {
             size: 10
         }
         
-        test = hammer1.weight  // weight field doesn't exist
+        int test = hammer1.weight  // weight field doesn't exist
         "#;
         let program = parse_program(input).unwrap();
         let result = typecheck_program(&program);
@@ -1143,9 +1216,9 @@ mod tests {
     #[test]
     fn test_match_expression() {
         let input = r#"
-        result = match({
+        result = match {
             _: 42
-        })
+        }
         "#;
         let program = parse_program(input).unwrap();
         let result = typecheck_program(&program);
@@ -1163,10 +1236,10 @@ mod tests {
         type Hammer: bool {
             material: Material,
             size: int,
-            weight: int = (h: Hammer) -> match({
+            weight: int = (h: Hammer) -> match {
                 h.material == Material.Steel: 10,
                 _: 5
-            })
+            }
         }
         
         type Toolbox: All {  
