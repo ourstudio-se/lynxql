@@ -1,408 +1,240 @@
-# 🦊 LynxQL - Declarative Modeling Language
+# Lynx – A Minimal DSL for Discrete Optimisation (July 2025)
 
-LynxQL is a **declarative modeling language** for defining and solving **combinatorial optimization problems** using **Integer Linear Programming (ILP)**. It features a complete Rust parser implementation with real-time type checking and VSCode extension support.
+**Lynx** lets you model MILP/SAT-style problems with just a few orthogonal
 
-## ✨ Key Features
+concepts: primitive values, type definitions, five logical combinators,
 
-### Language Features
-* **Declarative syntax** — no loops, no side effects
-* **Strong typing** with support for primitive and composite types
-* **Enum support** with type-safe variant checking
-* **Logic composition** using built-ins like `All`, `Any`, `AtLeast`, `Not`, etc.
-* **Lambda expressions** with type inference
-* **Built-in functions**: `find`, `match`, `sum`, `solve`, and more
-* **ILP-compatible**: all model logic compiles to linear formulations
+and a single optimisation call. Everything you write is guaranteed to
 
-### Implementation Features  
-* **Complete Rust parser** using `nom` parsing combinators
-* **Comprehensive type checker** with detailed error reporting
-* **Language Server Protocol (LSP)** support for real-time diagnostics
-* **VSCode extension** with syntax highlighting and intelligent error positioning
-* **Resilient parsing** that continues after errors to show multiple issues
+compile to a **linear/MILP** model; if you accidentally introduce
+
+non-linear logic, Lynx aborts at compile-time.
 
 ---
 
-## 📦 Quick Example
+## 0. Comment syntax
 
-```lynx
-enum Material {
-    Steel,
-    Wood,
-    Plastic
-}
-
-type Hammer: bool {
-    material: Material,
-    size: int,
-    cost: float
-}
-
-type Toolbox: All {
-    hammers: AtLeast<1>[Hammer] = (_) -> find((h: Hammer) -> h.size >= 8),
-    nails: Any[Nail]?,
-    weight: int = (t: Toolbox) -> match({
-        Any(find((h: Hammer) -> h.material == Material.Steel)): 10,
-        Any(find((h: Hammer) -> h.material == Material.Wood)): 7,
-        _: 5
-    })
-}
-
-type Carpenter: All {
-    name: string,
-    age: int,
-    workable: bool = (c: Carpenter) -> c.age >= 18,
-    toolbox: Toolbox,
-    salary: float = (c: Carpenter) -> 20000.0 - sum(c.toolbox.hammers.cost)
-}
-
-Hammer hammer1 {
-    material: Material.Steel,
-    size: 12,
-    cost: 25.50
-}
-
-Carpenter john {
-    name: "John Doe",
-    age: 30,
-    toolbox: Toolbox {
-        hammers: AtLeast<1> { hammer1 }
-    }
-}
-
-solution = solve(john, { hammer1: 1.0 }, { Not { hammer1 } })
+```
+// single-line comment
+/* 
+multi
+line 
+comment
+*/
 ```
 
 ---
 
-## 🚀 Getting Started
+## 1. Primitives and value ranges
 
-### Installation
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/lynx-lang/lynxql
-   cd lynxql
-   ```
-
-2. **Build the parser**:
-   ```bash
-   cargo build --release
-   ```
-
-3. **Install VSCode extension** (optional):
-   ```bash
-   cd vscode-lynx-extension
-   code --install-extension lynx-language-4.0.6.vsix
-   ```
-
-### Usage
-
-#### Parse and Type-check Files
-```bash
-# Parse a Lynx file
-cargo run --bin debug_parser your_file.lynx
-
-# Type-check with detailed output
-cargo run --bin typecheck_example your_file.lynx
-```
-
-#### Use as Rust Library
-```rust
-use lynxql::{parse_program, typecheck_program_with_details};
-
-let lynx_code = r#"
-type Hammer: bool {
-    material: string,
-    size: int,
-    cost: float
-}
-
-Hammer hammer1 {
-    material: "steel",
-    size: 12,
-    cost: 25.50
-}
-"#;
-
-match parse_program(lynx_code) {
-    Ok(program) => {
-        match typecheck_program_with_details(&program) {
-            Ok(env) => {
-                println!("✅ Program is type-safe!");
-                println!("Types: {}, Variables: {}", env.types.len(), env.variables.len());
-            }
-            Err(errors) => {
-                for error in errors {
-                    eprintln!("❌ Type error: {}", error);
-                }
-            }
-        }
-    }
-    Err(e) => eprintln!("❌ Parse error: {}", e),
-}
-```
-
-#### Language Server (LSP)
-```bash
-# Start LSP server for IDE integration
-cargo run --bin lynx-lsp
-```
+| Kind | Syntax | Notes |
+| --- | --- | --- |
+| Boolean decision | `Bool()` | Built‑in 0 / 1 variable; shorthand: `x = 0..1` is equivalent to `x = Bool()` |
+| Bounded integer | `Integer(min, max)` | Decision ∈ [min,max]. |
+| Named range | `alias Week = Integer<1,52>` | Pure type synonym. |
+| Sub-range variable | `Week(lo, hi)` | Bounds tightened at declaration time. |
+| Protected bounds | *every* var exposes`lower`,`upper` | After solve:`lower == upper`. |
 
 ---
 
-## 🧠 Language Concepts
+## 2. Defining types
 
-### 🧱 Type System
+Before the syntax, here is **what the example domain means**:
 
-#### Primitive Types
-* `bool` - Boolean values
-* `int` - Integer values  
-* `float` - Floating point values
-* `string` - String values
+- **Color** — a single Boolean decision (pick or don’t pick). It carries one *attribute* `tag` so we can refer to colours symbolically.
+- **Wheel** — another Boolean decision with attributes `tag` (e.g. `front`, `back`) and `weight`. Weight is numeric so we can penalise heavy wheels later.
+- **Price** — a composite variable of type `All`; it is true only if **both** of its children are true (`colors`, `wheel`). It holds a single scalar attribute `price`. Modellers can hang an *unbounded* set of `Price` nodes under a bicycle, one per colour–wheel combination.
+- **Bicycle** — the top‑level decision we want to optimise. It is also an `All`, meaning the bike exists iff its `colors` and `wheels` rules are satisfied. Extra attributes:
+    - `@totalPrice` — linear aggregate of all active `Price` nodes; safe for the MILP objective.
+    - `@heavyPen` — linear penalty based on any wheel weighing > 3 kg.
+    - `@nlMetric` — a deliberately non‑linear attribute, computed **after** the solve for reporting.
 
-#### Named Types
-```lynx
-type Size: int
-type Product: All {
-    options: Exactly<1>[Option],
-    price: float = (p: Product) -> sum(p.options.price)
-}
+With the semantics clear, here’s how that maps to Lynx syntax:
+
 ```
-
-#### Enum Types
-```lynx
-enum Material {
-    Steel,
-    Wood,
-    Plastic
+// leaf types
+type Color : Bool {
+    @tag   : str,
 }
 
-type Tool: bool {
-    material: Material  // Type-safe enum usage
+type Wheel : Bool {
+    @tag    : str,
+    @weight : float,
 }
-```
 
-### 🔗 Logic Types & Relationships
-
-Logic types express cardinality and relationship constraints:
-
-* `All[T]` – all connected instances must be satisfied
-* `Any[T]` – at least one must be satisfied  
-* `Exactly<N>[T]` – exactly N instances must be selected
-* `AtLeast<N>[T]` – at least N instances must be selected
-* `AtMost<N>[T]` – at most N instances must be selected
-* `Not[T]` – negation of the condition
-* Optional relationships use `?` after the type (e.g. `Any[Nail]?`)
-
-### 🪮 Computed Properties
-
-Properties can be computed using pure, side-effect-free lambda expressions:
-
-```lynx
-type Toolbox: All {
-    hammers: Any[Hammer],
-    total_cost: float = (t: Toolbox) -> sum(t.hammers.cost),
-    weight: int = (t: Toolbox) -> match({
-        Any(find((h: Hammer) -> h.material == Material.Steel)): 10,
-        _: 5
-    })
+type Price : All {
+    colors : Any[Color],
+    wheel  : Wheel,
+    @price : float,
 }
+
+// composite type
+type Bicycle : All {
+    colors      : ColorRule,
+    wheels      : WheelRule,
+    prices      : Free[Price],
+
+    @totalPrice : float = (Bicycle b) -> sum(b.prices.price),
+    @heavyPen   : float = (Bicycle b) -> 50 * Any(filter(b.wheels, w -> w.weight > 3.0)),
+    @nlMetric   : float = (Bicycle b) -> sum(b.prices.price) - 1.2 * b.heavyPen,
+}
+
 ```
 
-### 🔍 Find & Filter
+- **`type`** declares either a *leaf* (Bool / Integer) or a *composite*(logical operator after the colon).
+- Fields are separated by **commas** so you may keep everything on oneline if you like.
+- Attributes are marked only at the declaration site with `@`; youaccess them via normal dot notation (`wheel.weight`).
+- A right-hand side may be:
+    - a **literal**
+    - a **lambda** that resolves to a constant at call-time (compile-time
+        
+        for attributes, run-time for relationships).
+        
 
-Use `find((x: Type) -> condition)` to dynamically match instances:
+### 2.1 Logical combinators (run-time)
 
-```lynx
-heavy_hammers = find((h: Hammer) -> h.size >= 10)
-steel_tools = find((t: Tool) -> t.material == Material.Steel)
+| Name | Set form | Variadic form | Meaning |
+| --- | --- | --- | --- |
+| `All` | `All[S]` | `All(x1,…,xn)` | AND – true iff**every**child true |
+| `Any` | `Any[S]` | `Any(x1,…,xn)` | OR – true iff**at least one**child true |
+| `Not` | `Not[S]` | `Not(x1,…,xn)` | NOR – true iff**all**children false |
+| `Exactly<k>` | `Exactly<k>[S]` | `Exactly<k>(x)`⇔`x == k` | Cardinality / equality |
+| `AtMost<k>` | `AtMost<k>[S]` | `AtMost<k>(x)` | ≤ k |
+| `AtLeast<k>` | `AtLeast<k>[S]` | `AtLeast<k>(x)` | ≥ k |
+| `Free` | `Free[S]` | `Free(x1,…,xn)` | Children are**unconstrained**; truth values propagate as-is |
+
+Each call returns a **Boolean variable**. Inside `suchThat` you simply provide the expression; Lynx implicitly locks it to **true** (`1`). You never write `== 1`; inside
+
+`suchThat` Lynx *implicitly* forces the given Boolean to true.
+
+---
+
+## 3 Compile-time helpers
+
+| Helper | Purpose | Allowed operators |
+| --- | --- | --- |
+| `filter(context, λ)` | static subset;`context`may be`*`(root) or any set expression | `&&`, ` |
+| `firstTrue()` | on any set; returns the first member whose solved value is true | – |
+
+A `lambda` is any `(param) -> expr` expression. Inside `filter` it must
+
+be **static** (no decision values). Inside attributes it may reference
+
+other attributes but **must stay linear** if the attribute itself is used
+
+in `objective` or `suchThat`.
+
+### 3.2 Spread operator `...`
+
+`...expr` **unpacks** a static set (or list) into positional arguments when calling a constructor. Common use-case: turning the result of `filter` into the child list expected by `Any`, `All`, `Exactly`, or a rule constructor.
+
+```
+reds = filter(*, c -> c.tag == "red")
+rule = ColorRule(...reds)   // same as ColorRule(red1, red2, …)
+
 ```
 
-### 🧲 Match Expressions
+The operator works only on compile-time contexts (e.g., inside constructor calls or in default field values) and is a no-op after expansion: the compiler replaces it with the individual elements.
 
-Use `match` for piecewise logic with multiple conditions:
+### 3.1 Detecting non-linearity
 
-```lynx
-shipping_cost: float = (order: Order) -> match({
-    order.weight <= 5: 10.0,
-    order.weight <= 20: 25.0,
-    order.priority == "express": 50.0,
-    _: 35.0
-})
+If an `@attribute` is referenced in the optimisation layer and the
+
+compiler cannot linearise the expression, Lynx aborts with a clear error
+
+message. Non-linear attributes are still computed **post-solve** for
+
+reporting.
+
+---
+
+## 4 Optimisation call
+
 ```
-
-### 🚀 Optimization
-
-The `solve` function initiates optimization with:
-* **Target variable** to optimize
-* **Weighted objectives** (what to maximize/minimize)  
-* **Constraints** (what must be satisfied)
-
-```lynx
-solution = solve(
-    john,                           // Target variable
-    { hammer1: 1.0, nail1: 0.5 },  // Objectives with weights
-    { Not { expensive_tool } }      // Constraints
+solution = minimize(
+    objective = <scalar expr>,      // MILP-safe
+    suchThat  = <Boolean expr>,     // implicitly = true
+    options   = { timeLimit = 300 } // optional
 )
+
 ```
 
----
-
-## 🔧 Built-in Functions
-
-| Function         | Description                                         | Example |
-| ---------------- | --------------------------------------------------- | ------- |
-| `solve(var, obj, constraints)` | Optimize a variable with objectives and constraints | `solve(john, {hammer1: 1.0}, {Not{tool2}})` |
-| `find((x: T) -> condition)` | Select instances based on filter | `find((h: Hammer) -> h.size > 10)` |
-| `sum(collection)` | Add numeric values over a collection | `sum(toolbox.hammers.cost)` |
-| `match({conditions})` | Piecewise logic mapping | `match({x > 10: "big", _: "small"})` |
-| `propagate(logic)` | Forward-evaluate logical implications | `propagate(All{hammer1, hammer2})` |
-| `first(collection)` | Get the first element from a collection | `first(available_tools)` |
+- `maximize` mirrors `minimize`.
+- Build the Boolean with the combinators; wrap with `Not( … )` to force false.
+- Named keys inside the Boolean (`bicycle = myBike`) create *local
+references* for readability (identical to using the expression
+directly).
 
 ---
 
-## 🏗️ Parser & Type Checker
+## 5 End-to-end example
 
-### Architecture
+```
+// leaf types
+type Color : Bool { @tag : str, }
+type Wheel : Bool { @tag : str, @weight : float }
 
-The LynxQL implementation uses:
-* **`nom` parsing combinators** for robust, composable parsing
-* **Complete AST representation** of all language constructs
-* **Comprehensive type checker** with detailed error reporting
-* **Resilient parsing** that recovers from errors to show multiple issues
+type Price : All {
+    colors : Any[Color],
+    wheel  : Wheel,
+    @price : float,
+}
 
-### AST Structure
-* `Program` - Root node containing multiple statements
-* `Statement` - Top-level constructs (TypeDecl, InstanceDecl, Assignment, SolveCall)
-* `TypeDecl` - Type declarations with logic types and field specifications  
-* `Expr` - Expressions including literals, lambdas, logic expressions, constructors
-* `LogicType` - Logic types (All, Any, Not, Boolean, Integer, IntegerRange, etc.)
+alias ColorRule = Exactly<1>[Color]
+alias WheelRule = Exactly<1>[Wheel]
 
-### Type Checking Features
-* **Complete type system** validation for all Lynx constructs
-* **Enum validation** ensuring valid variants and type compatibility
-* **Lambda type inference** with parameter and return type checking
-* **Field validation** for assignments, required fields, and optional fields
-* **Logic type support** for all cardinality and relationship operators
-* **Comprehensive error reporting** with detailed, actionable messages
+// composite
+type Bicycle : All {
+    colors      : ColorRule,
+    wheels      : WheelRule,
+    prices      : Free[Price],
+    @totalPrice : float = (Bicycle b) -> sum(b.prices.price),
+}
 
-### Error Types
+// data
+red   = Color(tag = "red")
+front = Wheel(tag = "front", weight = 3.2)
 
-The type checker provides detailed errors through `TypeCheckError`:
+price1 = Price(colors = Any(red), wheel = front, price = 150)
 
-* `UndefinedType` - Reference to undefined type
-* `UndefinedEnumVariant` - Invalid enum variant usage
-* `TypeMismatch` - Type incompatibility 
-* `FieldNotFound` - Unknown field in type
-* `MissingRequiredField` - Required field not provided
-* `InvalidLambda` - Lambda expression errors
-* `InvalidLogicExpression` - Logic type constraint errors
+// compile-time sets
+aRed   = filter(*, c -> c.tag == "red")
+frontW = filter(*, w -> w.tag == "front")
 
----
+myBike = Bicycle(
+    colors = ColorRule(...aRed),
+    wheels = WheelRule(...frontW),
+    prices = Free(price1),
+)
 
-## 💻 VSCode Extension
+alias Week = Integer<1,52>
+productionWeek = Week(4,32)
 
-The VSCode extension provides:
+solution = minimize(
+    objective = myBike.totalPrice,
+    suchThat  = All(
+        myBike,
+        Exactly<12>(productionWeek),
+        Has(frontW.tag, "front"),
+    ),
+)
 
-* **Complete syntax highlighting** for all Lynx constructs
-* **Real-time type checking** with LSP integration
-* **Intelligent error positioning** showing errors at exact source locations
-* **Auto-completion** for types, fields, and built-in functions
-* **Custom color theme** optimized for Lynx code
-* **Multi-comment support** (`//` and `/* */`)
+chosenColour = solution.colors.firstTrue()
 
-### Installation
-1. Download `lynx-language-4.0.6.vsix` from releases
-2. Install via VSCode: Extensions → Install from VSIX
-3. Configure LSP server path in settings
-
----
-
-## 📜 Design Constraints
-
-LynxQL compiles to **Integer Linear Programs**, which enforces:
-
-* ❌ No loops or recursion
-* ❌ No nonlinear math (e.g. `x * y`, `x / y`) 
-* ❌ No side effects or mutations
-* ✅ All functions must return **linear-compatible** results
-* ✅ All expressions are **deterministic and pure**
-* ✅ All logic must be expressible as linear constraints
-
----
-
-## 📃 File Format
-
-* **Extension**: `.lynx`
-* **Comments**: 
-  * Single-line: `// comment`
-  * Multi-line: `/* block comment */`
-* **Encoding**: UTF-8
-
----
-
-## 🔧 Development Commands
-
-### Building and Testing
-```bash
-cargo build                    # Build the project
-cargo test                     # Run all tests  
-cargo check                    # Check code without building
-cargo clippy                   # Run linting
-cargo fmt                      # Format code
 ```
 
-### Parser Testing
-```bash
-cargo run --bin debug_parser   # Test parser on specific inputs
-cargo run --bin test_example   # Test example.lynx constructs
-```
+The solver returns a *new, solved instance* of `Bicycle`; you drill down
 
-### Documentation
-```bash
-cargo doc --open              # Generate and open documentation
-```
+through dot access, `firstTrue()`, or `filter(..., v -> v.lower == 1)` to
+
+inspect any decision.
 
 ---
 
-## 🛣️ Roadmap
+## 6 Key guarantees
 
-* [x] Complete Rust parser with `nom`
-* [x] Comprehensive type checker  
-* [x] Enum type support with validation
-* [x] Lambda expressions with type inference
-* [x] Language Server Protocol (LSP) implementation
-* [x] VSCode extension with real-time diagnostics
-* [x] Intelligent error positioning
-* [x] Resilient parsing for multiple error reporting
-* [ ] Static linearity checker for ILP compatibility
-* [ ] Integration with ILP solvers
-* [ ] Advanced type inference and shape analysis
-* [ ] Performance optimizations
-* [ ] Additional IDE integrations
+- **Linear-safety** – optimisation layer refuses non-linear expressions.
+- **No hidden operators** – only five combinators and the helpers above.
+- **Immutable modelling** – optimisation call never mutates your originalobjects; results are returned as new solved instances.
 
----
-
-## 📚 Learn More
-
-* **Examples**: See `example.lynx` and `example_with_enums.lynx`
-* **Grammar**: Reference `grammar.lark` for complete syntax specification
-* **VSCode Extension**: Check `vscode-lynx-extension/` directory
-* **API Documentation**: Run `cargo doc --open`
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality  
-4. Ensure all tests pass with `cargo test`
-5. Run `cargo clippy` and `cargo fmt`
-6. Submit a pull request
-
----
-
-## 📄 License
-
-MIT License - see LICENSE file for details.
+Enjoy modelling with **Lynx**—minimal syntax, maximal clarity.

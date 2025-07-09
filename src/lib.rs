@@ -1,77 +1,18 @@
-//! # LynxQL - Lynx Language Parser and Typechecker
-//! 
-//! A parser and typechecker for the Lynx declarative modeling language - a statically typed language
-//! for expressing combinatorial optimization problems using Integer Linear Programming (ILP).
-//! 
-//! ## Usage
-//! 
-//! ```rust
-//! use lynxql::{parse_program, typecheck_program};
-//! 
-//! let lynx_code = r#"
-//! type Hammer: bool {
-//!   material: string,
-//!   size: int,
-//!   cost: float
-//! }
-//! 
-//! Hammer hammer1 {
-//!   material: "steel",
-//!   size: 10,
-//!   cost: 25.0
-//! }
-//! "#;
-//! 
-//! match parse_program(lynx_code) {
-//!     Ok(program) => {
-//!         println!("Parsed {} statements", program.statements.len());
-//!         
-//!         // Type check the program
-//!         match typecheck_program(&program) {
-//!             Ok(()) => println!("Program is type-safe!"),
-//!             Err(errors) => {
-//!                 for error in errors {
-//!                     eprintln!("Type error: {}", error);
-//!                 }
-//!             }
-//!         }
-//!     }
-//!     Err(e) => {
-//!         eprintln!("Parse error: {}", e);
-//!     }
-//! }
-//! ```
-
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while1, take_while, take_until},
-    character::complete::{char, digit1, alpha1, alphanumeric1, line_ending, not_line_ending},
-    combinator::{opt, map, recognize, value},
-    multi::{many0, separated_list0, separated_list1},
-    sequence::{delimited, preceded, tuple, pair, terminated},
-    IResult,
+    bytes::complete::{tag, take_until, take_while1},
+    character::complete::{
+        alpha1, alphanumeric1, char, digit1, line_ending, multispace0, multispace1, space0,
+    },
+    combinator::{map, opt, recognize, value},
+    error::ParseError,
+    multi::{many0, many1, separated_list0, separated_list1},
+    sequence::{delimited, pair, preceded, terminated, tuple},
+    IResult, Parser,
 };
+use std::collections::HashMap;
+use std::fmt;
 use thiserror::Error;
-
-// Modules
-pub mod typechecker;
-pub mod resilient_parser;
-
-// Re-export typechecker functions
-pub use typechecker::{typecheck_program, typecheck_program_with_details, TypeCheckError, TypeEnvironment};
-
-// Re-export resilient parser
-pub use resilient_parser::{parse_program_resilient, ParseResult, ResilientParseError};
-
-// All types are already declared as `pub` below, so they are accessible as lynxql::TypeName
-
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("Parse error: {0}")]
-    Nom(String),
-    #[error("Invalid syntax: {0}")]
-    InvalidSyntax(String),
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -81,240 +22,168 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     TypeDecl(TypeDecl),
-    EnumDecl(EnumDecl),
+    Alias(Alias),
     Assignment(Assignment),
-    SolveCall(SolveCall),
+    Solve(Solve),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
     pub name: String,
     pub base_type: BaseType,
-    pub fields: Vec<FieldDecl>,
+    pub fields: Vec<Field>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct EnumDecl {
+pub struct Alias {
     pub name: String,
-    pub variants: Vec<EnumVariant>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct EnumVariant {
-    pub name: String,
-    pub value: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum BaseType {
-    Primitive(PrimitiveType),
-    Logic(LogicType),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PrimitiveType {
-    Bound(i32, i32),
-    Int,
-    Float,
-    String,
-    Bool,
-    Named(String),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum LogicType {
-    All,
-    Any,
-    Not,
-    Exactly(i32),
-    AtLeast(i32),
-    AtMost(i32),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldDecl {
-    pub name: String,
-    pub type_ref: TypeRef,
-    pub is_optional: bool,
-    pub default: Option<Expr>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypeRef {
-    Primitive(PrimitiveType),
-    Logic { logic_type: LogicType, inner: Box<TypeRef> },
-    Named(String),
-}
-
-// New instance declaration syntax: TypeName instance_name { ... }
-#[derive(Debug, Clone, PartialEq)]
-pub struct InstanceDecl {
-    pub type_name: String,
-    pub instance_name: String,
-    pub fields: Vec<FieldAssign>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldAssign {
-    pub name: String,
-    pub value: Expr,
+    pub target: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
-    pub type_name: String,
     pub name: String,
-    pub value: Expr,
+    pub expr: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub struct Solve {
+    pub name: String,
+    pub method: SolveMethod,
+    pub objective: Expression,
+    pub constraints: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SolveMethod {
+    Minimize,
+    Maximize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BaseType {
+    Bool,
+    Integer(Option<i64>, Option<i64>),
+    Float,
+    String,
+    All,
+    Any,
+    Not,
+    Exactly(i64),
+    AtLeast(i64),
+    AtMost(i64),
+    Free,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub name: String,
+    pub field_type: Type,
+    pub is_attribute: bool,
+    pub default_value: Option<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Primitive(PrimitiveType),
+    Named(String),
+    Parameterized(String, Vec<Type>),
+    Collection(Box<Type>),
+    Bounded(Box<Type>, i64, i64),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimitiveType {
+    Bool,
+    Int,
+    Float,
+    String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
     Literal(Literal),
     Identifier(String),
+    FieldAccess(Box<Expression>, String),
+    Call(String, Vec<Expression>),
+    Lambda(Lambda),
+    LogicOp(LogicOp),
+    Constructor(String, Vec<FieldAssignment>),
+    Range(i64, i64),
+    Filter(Box<Expression>, Box<Expression>),
+    Spread(Box<Expression>),
     GlobalContext,
-    EnumAccess(EnumAccess),
-    Lambda(LambdaExpr),
-    Match(MatchExpr),
-    BuiltinCall(BuiltinCall),
-    Logic(LogicExpr),
-    ObjectLiteral(ObjectLiteral),
-    AnonymousObjectLiteral(Vec<FieldAssign>),
-    ListLiteral(Vec<Expr>),
-    SetLiteral(Vec<Expr>),
-    FieldAccess(FieldAccess),
-    ArithExpr(ArithExpr),
-    BinaryOp(BinaryOpExpr),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct EnumAccess {
-    pub enum_name: String,
-    pub variant_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ObjectLiteral {
-    pub type_name: String,
-    pub fields: Vec<FieldAssign>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldAccess {
-    pub base: String,
-    pub fields: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ArithExpr {
-    Add(Box<Expr>, Box<Expr>),
-    Subtract(Box<Expr>, Box<Expr>),
-    Multiply(Box<Expr>, Box<Expr>),
-    Factor(Box<Expr>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BinaryOpExpr {
-    pub left: Box<Expr>,
-    pub operator: String,
-    pub right: Box<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    String(String),
+    Bool(bool),
     Int(i64),
     Float(f64),
-    Bool(bool),
+    String(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LambdaExpr {
+pub struct Lambda {
     pub param: Option<String>,
     pub param_type: Option<String>,
-    pub body: Box<Expr>,
+    pub body: Box<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MatchExpr {
-    pub cases: Vec<MatchCase>,
+pub struct LogicOp {
+    pub op: LogicOperator,
+    pub operands: Vec<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MatchCase {
-    Pattern { pattern: Expr, value: Expr },
-    Wildcard { value: Expr },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BuiltinCall {
-    pub name: String,
-    pub args: Vec<Arg>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Arg {
-    Positional(Expr),
-    Named { name: String, value: Expr },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LogicExpr {
-    pub op: LogicOp,
-    pub args: Vec<Expr>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum LogicOp {
+pub enum LogicOperator {
     All,
     Any,
     Not,
-    Exactly(i32),
-    AtLeast(i32),
-    AtMost(i32),
+    Exactly(i64),
+    AtLeast(i64),
+    AtMost(i64),
+    Free,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SolveCall {
-    pub var_name: String,
-    pub target: Expr,
-    pub objectives: Vec<ObjectiveItem>,
-    pub constraints: Vec<Expr>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ObjectiveItem {
+pub struct FieldAssignment {
     pub name: String,
-    pub weight: f64,
+    pub value: Expression,
 }
 
-// Parser implementation
-pub fn parse_program(input: &str) -> Result<Program, ParseError> {
-    match program(input) {
-        Ok((_, program)) => Ok(program),
-        Err(err) => Err(ParseError::Nom(err.to_string())),
-    }
+#[derive(Debug, Error)]
+pub enum LynxError {
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    #[error("Type error: {0}")]
+    TypeError(String),
+    #[error("Undefined symbol: {0}")]
+    UndefinedSymbol(String),
+    #[error("Invalid type: {0}")]
+    InvalidType(String),
 }
 
-fn ws<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
-where
-    F: FnMut(&'a str) -> IResult<&'a str, O>,
-{
-    delimited(multispace_and_comments, inner, multispace_and_comments)
+pub type LynxResult<T> = Result<T, LynxError>;
+
+pub fn parse_program(input: &str) -> IResult<&str, Program> {
+    let (input, _) = skip_whitespace_and_comments(input)?;
+    map(
+        many0(preceded(skip_whitespace_and_comments, parse_statement)),
+        |statements| Program { statements },
+    )(input)
 }
 
-fn multispace_and_comments(input: &str) -> IResult<&str, ()> {
-    let (input, _) = many0(alt((
-        value((), single_line_comment),
-        value((), multi_line_comment),
-        map(take_while1(|c: char| c.is_whitespace()), |_| ()),
-    )))(input)?;
+fn skip_whitespace_and_comments(input: &str) -> IResult<&str, ()> {
+    let (input, _) = many0(alt((multispace1, single_line_comment, multi_line_comment)))(input)?;
     Ok((input, ()))
 }
 
 fn single_line_comment(input: &str) -> IResult<&str, &str> {
     let (input, _) = tag("//")(input)?;
-    let (input, comment) = not_line_ending(input)?;
-    let (input, _) = opt(line_ending)(input)?;
+    let (input, comment) = take_until("\n")(input)?;
+    let (input, _) = char('\n')(input)?;
     Ok((input, comment))
 }
 
@@ -325,628 +194,602 @@ fn multi_line_comment(input: &str) -> IResult<&str, &str> {
     Ok((input, comment))
 }
 
-fn program(input: &str) -> IResult<&str, Program> {
-    let (input, statements) = many0(ws(statement))(input)?;
-    let (input, _) = multispace_and_comments(input)?; // Consume any trailing whitespace/comments
-    
-    // Check if there's unparsed content
-    if !input.trim().is_empty() {
-        eprintln!("Warning: Unparsed content remaining: {:?}", &input[..input.len().min(100)]);
-    }
-    
-    Ok((input, Program { statements }))
-}
-
-fn statement(input: &str) -> IResult<&str, Statement> {
+fn parse_statement(input: &str) -> IResult<&str, Statement> {
     alt((
-        map(type_decl, Statement::TypeDecl),
-        map(enum_decl, Statement::EnumDecl),
-        map(assignment, Statement::Assignment),
-        map(solve_call, Statement::SolveCall),
+        map(parse_type_decl, Statement::TypeDecl),
+        map(parse_alias, Statement::Alias),
+        map(parse_solve, Statement::Solve),
+        map(parse_assignment, Statement::Assignment),
     ))(input)
 }
 
-fn type_decl(input: &str) -> IResult<&str, TypeDecl> {
-    let (input, _) = ws(tag("type"))(input)?;
-    let (input, name) = ws(type_name)(input)?;
-    let (input, _) = ws(char(':'))(input)?;
-    let (input, base_type) = ws(base_type)(input)?;
+fn parse_type_decl(input: &str) -> IResult<&str, TypeDecl> {
+    let (input, _) = tag("type")(input)?;
+    let (input, _) = skip_whitespace_and_comments(input)?;
+    let (input, name) = parse_type_name(input)?;
+    let (input, _) = skip_whitespace_and_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = skip_whitespace_and_comments(input)?;
+    let (input, base_type) = parse_base_type(input)?;
+    let (input, _) = skip_whitespace_and_comments(input)?;
     let (input, fields) = opt(delimited(
-        ws(char('{')),
-        field_decl_list,
-        ws(char('}'))
+        char('{'),
+        preceded(
+            skip_whitespace_and_comments,
+            separated_list0(
+                preceded(skip_whitespace_and_comments, char(',')),
+                parse_field,
+            ),
+        ),
+        preceded(skip_whitespace_and_comments, char('}')),
     ))(input)?;
-    
-    Ok((input, TypeDecl {
-        name: name.to_string(),
-        base_type,
-        fields: fields.unwrap_or_default(),
-    }))
+
+    Ok((
+        input,
+        TypeDecl {
+            name,
+            base_type,
+            fields: fields.unwrap_or_default(),
+        },
+    ))
 }
 
-fn base_type(input: &str) -> IResult<&str, BaseType> {
+fn parse_alias(input: &str) -> IResult<&str, Alias> {
+    let (input, _) = tag("alias")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, name) = parse_type_name(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, target) = parse_type(input)?;
+
+    Ok((input, Alias { name, target }))
+}
+
+fn parse_assignment(input: &str) -> IResult<&str, Assignment> {
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, expr) = parse_expression(input)?;
+
+    Ok((input, Assignment { name, expr }))
+}
+
+fn parse_solve(input: &str) -> IResult<&str, Solve> {
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, method) = alt((
+        value(SolveMethod::Minimize, tag("minimize")),
+        value(SolveMethod::Maximize, tag("maximize")),
+    ))(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("objective")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, objective) = parse_expression(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("suchThat")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, constraints) = parse_expression(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((
+        input,
+        Solve {
+            name,
+            method,
+            objective,
+            constraints,
+        },
+    ))
+}
+
+fn parse_base_type(input: &str) -> IResult<&str, BaseType> {
     alt((
-        map(logic_type, BaseType::Logic),
-        map(primitive_type, BaseType::Primitive),
-    ))(input)
-}
-
-fn primitive_type(input: &str) -> IResult<&str, PrimitiveType> {
-    alt((
-        map(
-            tuple((int_literal, ws(tag("..")), int_literal)),
-            |(from, _, to)| PrimitiveType::Bound(from as i32, to as i32),
-        ),
-        value(PrimitiveType::Int, tag("int")),
-        value(PrimitiveType::Float, tag("float")),
-        value(PrimitiveType::String, tag("string")),
-        value(PrimitiveType::Bool, tag("bool")),
-        map(type_name, |name| PrimitiveType::Named(name.to_string())),
-    ))(input)
-}
-
-fn logic_type(input: &str) -> IResult<&str, LogicType> {
-    alt((
-        value(LogicType::All, tag("All")),
-        value(LogicType::Any, tag("Any")),
-        value(LogicType::Not, tag("Not")),
-        map(
-            tuple((tag("Exactly"), ws(char('<')), ws(int_literal), ws(char('>')))),
-            |(_, _, n, _)| LogicType::Exactly(n as i32)
-        ),
-        map(
-            tuple((tag("AtLeast"), ws(char('<')), ws(int_literal), ws(char('>')))),
-            |(_, _, n, _)| LogicType::AtLeast(n as i32)
-        ),
-        map(
-            tuple((tag("AtMost"), ws(char('<')), ws(int_literal), ws(char('>')))),
-            |(_, _, n, _)| LogicType::AtMost(n as i32)
-        ),
-    ))(input)
-}
-
-fn field_decl_list(input: &str) -> IResult<&str, Vec<FieldDecl>> {
-    // Allow trailing commas and missing commas between fields
-    let (input, first) = opt(field_decl)(input)?;
-    if first.is_none() {
-        return Ok((input, Vec::new()));
-    }
-    
-    let mut fields = vec![first.unwrap()];
-    let mut remaining = input;
-    
-    loop {
-        // Try to consume optional comma and whitespace
-        let (input_after_comma, _) = opt(ws(char(',')))(remaining)?;
-        
-        // Try to parse another field
-        if let Ok((new_input, field)) = ws(field_decl)(input_after_comma) {
-            fields.push(field);
-            remaining = new_input;
-        } else {
-            // No more fields, return what we have
-            remaining = input_after_comma;
-            break;
-        }
-    }
-    
-    Ok((remaining, fields))
-}
-
-fn field_decl(input: &str) -> IResult<&str, FieldDecl> {
-    let (input, name) = ws(identifier)(input)?;
-    let (input, _) = ws(char(':'))(input)?;
-    let (input, type_ref) = ws(type_ref)(input)?;
-    let (input, is_optional) = opt(ws(char('?')))(input)?;
-    let (input, default) = opt(preceded(ws(char('=')), ws(expr)))(input)?;
-    
-    Ok((input, FieldDecl {
-        name: name.to_string(),
-        type_ref,
-        is_optional: is_optional.is_some(),
-        default,
-    }))
-}
-
-fn type_ref(input: &str) -> IResult<&str, TypeRef> {
-    alt((
-        map(
-            tuple((logic_type, ws(char('[')), ws(type_ref), ws(char(']')))),
-            |(logic_type, _, inner, _)| TypeRef::Logic {
-                logic_type,
-                inner: Box::new(inner),
-            }
-        ),
-        map(primitive_type, TypeRef::Primitive),
-        map(type_name, |name| TypeRef::Named(name.to_string())),
-    ))(input)
-}
-
-// New instance declaration syntax: TypeName instance_name { ... }
-
-fn field_assign_list(input: &str) -> IResult<&str, Vec<FieldAssign>> {
-    separated_list0(ws(char(',')), field_assign)(input)
-}
-
-fn field_assign(input: &str) -> IResult<&str, FieldAssign> {
-    let (input, name) = ws(identifier)(input)?;
-    let (input, _) = ws(char(':'))(input)?;
-    let (input, value) = ws(expr)(input)?;
-    
-    Ok((input, FieldAssign {
-        name: name.to_string(),
-        value,
-    }))
-}
-
-fn assignment(input: &str) -> IResult<&str, Assignment> {
-    alt((
-        instance_decl_assignment,
-        regular_assignment,
-    ))(input)
-}
-
-fn instance_decl_assignment(input: &str) -> IResult<&str, Assignment> {
-    let (input, type_name) = ws(alt((type_name, primitive_type_name)))(input)?;
-    let (input, instance_name) = ws(identifier)(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, fields) = field_assign_list(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    
-    Ok((input, Assignment {
-        type_name: type_name.to_string(),
-        name: instance_name.to_string(),
-        value: Expr::AnonymousObjectLiteral(fields),
-    }))
-}
-
-fn regular_assignment(input: &str) -> IResult<&str, Assignment> {
-    let (input, type_name) = ws(alt((type_name, primitive_type_name)))(input)?;
-    let (input, name) = ws(identifier)(input)?;
-    let (input, _) = ws(char('='))(input)?;
-    let (input, value) = ws(expr)(input)?;
-    
-    Ok((input, Assignment {
-        type_name: type_name.to_string(),
-        name: name.to_string(),
-        value,
-    }))
-}
-
-fn primitive_type_name(input: &str) -> IResult<&str, &str> {
-    alt((
-        tag("int"),
-        tag("float"),
-        tag("string"),
-        tag("bool"),
-    ))(input)
-}
-
-fn expr(input: &str) -> IResult<&str, Expr> {
-    comparison_expr(input)
-}
-
-// Precedence levels: comparison < arithmetic < primary
-fn comparison_expr(input: &str) -> IResult<&str, Expr> {
-    let (input, left) = arithmetic_expr(input)?;
-    
-    // Try to parse comparison operators
-    if let Ok((input, op)) = ws(comparison_op)(input) {
-        let (input, right) = arithmetic_expr(input)?;
-        Ok((input, Expr::BinaryOp(BinaryOpExpr {
-            left: Box::new(left),
-            operator: op.to_string(),
-            right: Box::new(right),
-        })))
-    } else {
-        Ok((input, left))
-    }
-}
-
-fn comparison_op(input: &str) -> IResult<&str, &str> {
-    alt((
-        tag(">="),
-        tag("<="),
-        tag("=="),
-        tag("!="),
-        tag(">"),
-        tag("<"),
-    ))(input)
-}
-
-fn arithmetic_expr(input: &str) -> IResult<&str, Expr> {
-    let (input, left) = primary_expr(input)?;
-    
-    // Try to parse arithmetic operators (left-associative)
-    let mut current = left;
-    let mut remaining = input;
-    
-    loop {
-        if let Ok((new_input, op)) = ws(arithmetic_op)(remaining) {
-            if let Ok((new_input, right)) = primary_expr(new_input) {
-                current = Expr::BinaryOp(BinaryOpExpr {
-                    left: Box::new(current),
-                    operator: op.to_string(),
-                    right: Box::new(right),
-                });
-                remaining = new_input;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-    
-    Ok((remaining, current))
-}
-
-fn arithmetic_op(input: &str) -> IResult<&str, &str> {
-    alt((
-        tag("+"),
-        tag("-"),
-        tag("*"),
-        tag("/"),
-    ))(input)
-}
-
-fn primary_expr(input: &str) -> IResult<&str, Expr> {
-    alt((
-        map(literal, Expr::Literal),
-        map(global_context, |_| Expr::GlobalContext),
-        map(enum_access, Expr::EnumAccess),
-        map(lambda_expr, Expr::Lambda),
-        map(match_expr, Expr::Match),
-        map(builtin_call, Expr::BuiltinCall),
-        map(logic_expr, Expr::Logic),
-        map(object_literal, Expr::ObjectLiteral),
-        map(anonymous_object_literal, Expr::AnonymousObjectLiteral),
-        map(list_literal, Expr::ListLiteral),
-        map(set_literal, Expr::SetLiteral),
-        map(field_access, Expr::FieldAccess),
-        map(identifier, |s| Expr::Identifier(s.to_string())),
-        // Parenthesized expressions
-        delimited(ws(char('(')), expr, ws(char(')'))),
-    ))(input)
-}
-
-fn literal(input: &str) -> IResult<&str, Literal> {
-    alt((
-        map(string_literal, Literal::String),
-        map(float_literal, Literal::Float),
-        map(int_literal, Literal::Int),
-        map(bool_literal, Literal::Bool),
-    ))(input)
-}
-
-fn string_literal(input: &str) -> IResult<&str, String> {
-    let (input, _) = char('"')(input)?;
-    let (input, s) = take_while(|c| c != '"')(input)?;
-    let (input, _) = char('"')(input)?;
-    Ok((input, s.to_string()))
-}
-
-fn int_literal(input: &str) -> IResult<&str, i64> {
-    map(digit1, |s: &str| s.parse().unwrap())(input)
-}
-
-fn float_literal(input: &str) -> IResult<&str, f64> {
-    map(
-        recognize(tuple((digit1, char('.'), digit1))),
-        |s: &str| s.parse().unwrap(),
-    )(input)
-}
-
-fn bool_literal(input: &str) -> IResult<&str, bool> {
-    alt((
-        value(true, tag("true")),
-        value(false, tag("false")),
-    ))(input)
-}
-
-fn lambda_expr(input: &str) -> IResult<&str, LambdaExpr> {
-    alt((
-        // Simple lambda: (_) -> expr
-        map(
-            tuple((ws(char('(')), opt(ws(char('_'))), ws(char(')')), ws(tag("->")), ws(expr))),
-            |(_, _, _, _, body)| LambdaExpr {
-                param: None,
-                param_type: None,
-                body: Box::new(body),
-            }
-        ),
-        // Typed lambda: (Type param) -> expr
+        value(BaseType::Bool, tag("Bool")),
         map(
             tuple((
-                ws(char('(')),
-                ws(type_name),
-                ws(identifier),
-                ws(char(')')),
-                ws(tag("->")),
-                ws(expr)
+                tag("Integer"),
+                opt(delimited(
+                    char('('),
+                    tuple((
+                        preceded(multispace0, parse_integer),
+                        preceded(tuple((multispace0, char(','), multispace0)), parse_integer),
+                    )),
+                    preceded(multispace0, char(')')),
+                )),
             )),
-            |(_, param_type, param, _, _, body)| LambdaExpr {
-                param: Some(param.to_string()),
-                param_type: Some(param_type.to_string()),
-                body: Box::new(body),
-            }
+            |(_, bounds)| {
+                if let Some((min, max)) = bounds {
+                    BaseType::Integer(Some(min), Some(max))
+                } else {
+                    BaseType::Integer(None, None)
+                }
+            },
+        ),
+        value(BaseType::Float, tag("Float")),
+        value(BaseType::String, tag("String")),
+        value(BaseType::All, tag("All")),
+        value(BaseType::Any, tag("Any")),
+        value(BaseType::Not, tag("Not")),
+        value(BaseType::Free, tag("Free")),
+        map(
+            tuple((
+                tag("Exactly"),
+                delimited(char('<'), preceded(multispace0, parse_integer), char('>')),
+            )),
+            |(_, n)| BaseType::Exactly(n),
+        ),
+        map(
+            tuple((
+                tag("AtLeast"),
+                delimited(char('<'), preceded(multispace0, parse_integer), char('>')),
+            )),
+            |(_, n)| BaseType::AtLeast(n),
+        ),
+        map(
+            tuple((
+                tag("AtMost"),
+                delimited(char('<'), preceded(multispace0, parse_integer), char('>')),
+            )),
+            |(_, n)| BaseType::AtMost(n),
         ),
     ))(input)
 }
 
-fn match_expr(input: &str) -> IResult<&str, MatchExpr> {
-    let (input, _) = ws(tag("match"))(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, cases) = terminated(
-        separated_list0(ws(char(',')), match_case),
-        opt(ws(char(',')))
+fn parse_field(input: &str) -> IResult<&str, Field> {
+    let (input, is_attribute) = map(opt(char('@')), |attr| attr.is_some())(input)?;
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, field_type) = parse_type(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, default_value) =
+        opt(preceded(tuple((char('='), multispace0)), parse_expression))(input)?;
+
+    Ok((
+        input,
+        Field {
+            name,
+            field_type,
+            is_attribute,
+            default_value,
+        },
+    ))
+}
+
+fn parse_type(input: &str) -> IResult<&str, Type> {
+    alt((
+        map(parse_primitive_type, Type::Primitive),
+        map(
+            tuple((
+                parse_type_name,
+                opt(delimited(
+                    char('<'),
+                    separated_list1(preceded(multispace0, char(',')), parse_type),
+                    char('>'),
+                )),
+                opt(delimited(char('['), parse_type, char(']'))),
+            )),
+            |(name, params, collection)| {
+                let base_type = if let Some(params) = params {
+                    Type::Parameterized(name, params)
+                } else {
+                    Type::Named(name)
+                };
+
+                if let Some(inner_type) = collection {
+                    Type::Collection(Box::new(base_type))
+                } else {
+                    base_type
+                }
+            },
+        ),
+    ))(input)
+}
+
+fn parse_primitive_type(input: &str) -> IResult<&str, PrimitiveType> {
+    alt((
+        value(PrimitiveType::Bool, tag("bool")),
+        value(PrimitiveType::Int, tag("int")),
+        value(PrimitiveType::Float, tag("float")),
+        value(PrimitiveType::String, tag("str")),
+    ))(input)
+}
+
+fn parse_expression(input: &str) -> IResult<&str, Expression> {
+    alt((
+        parse_range,
+        parse_logic_op,
+        parse_constructor,
+        parse_call,
+        parse_lambda,
+        parse_field_access,
+        parse_filter,
+        parse_spread,
+        map(parse_literal, Expression::Literal),
+        map(parse_identifier, Expression::Identifier),
+        value(Expression::GlobalContext, char('*')),
+    ))(input)
+}
+
+fn parse_range(input: &str) -> IResult<&str, Expression> {
+    let (input, start) = parse_integer(input)?;
+    let (input, _) = tag("..")(input)?;
+    let (input, end) = parse_integer(input)?;
+    Ok((input, Expression::Range(start, end)))
+}
+
+fn parse_logic_op(input: &str) -> IResult<&str, Expression> {
+    let (input, op) = parse_logic_operator(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, operands) = delimited(
+        char('('),
+        separated_list0(preceded(multispace0, char(',')), parse_expression),
+        preceded(multispace0, char(')')),
     )(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    
-    Ok((input, MatchExpr {
-        cases,
-    }))
+
+    Ok((input, Expression::LogicOp(LogicOp { op, operands })))
 }
 
-fn match_case(input: &str) -> IResult<&str, MatchCase> {
+fn parse_logic_operator(input: &str) -> IResult<&str, LogicOperator> {
     alt((
+        value(LogicOperator::All, tag("All")),
+        value(LogicOperator::Any, tag("Any")),
+        value(LogicOperator::Not, tag("Not")),
+        value(LogicOperator::Free, tag("Free")),
         map(
-            tuple((ws(char('_')), ws(char(':')), ws(expr))),
-            |(_, _, value)| MatchCase::Wildcard { value },
+            tuple((
+                tag("Exactly"),
+                delimited(char('<'), preceded(multispace0, parse_integer), char('>')),
+            )),
+            |(_, n)| LogicOperator::Exactly(n),
         ),
         map(
-            tuple((expr, ws(char(':')), ws(expr))),
-            |(pattern, _, value)| MatchCase::Pattern { pattern, value },
+            tuple((
+                tag("AtLeast"),
+                delimited(char('<'), preceded(multispace0, parse_integer), char('>')),
+            )),
+            |(_, n)| LogicOperator::AtLeast(n),
+        ),
+        map(
+            tuple((
+                tag("AtMost"),
+                delimited(char('<'), preceded(multispace0, parse_integer), char('>')),
+            )),
+            |(_, n)| LogicOperator::AtMost(n),
         ),
     ))(input)
 }
 
-fn builtin_call(input: &str) -> IResult<&str, BuiltinCall> {
-    let (input, name) = builtin_name(input)?;
-    let (input, _) = ws(char('('))(input)?;
-    let (input, args) = opt(arg_list)(input)?;
-    let (input, _) = ws(char(')'))(input)?;
-    
-    Ok((input, BuiltinCall {
-        name: name.to_string(),
-        args: args.unwrap_or_default(),
-    }))
+fn parse_constructor(input: &str) -> IResult<&str, Expression> {
+    let (input, name) = parse_type_name(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, fields) = delimited(
+        char('('),
+        separated_list0(preceded(multispace0, char(',')), parse_field_assignment),
+        preceded(multispace0, char(')')),
+    )(input)?;
+
+    Ok((input, Expression::Constructor(name, fields)))
 }
 
-fn builtin_name(input: &str) -> IResult<&str, &str> {
-    alt((
-        tag("solve"),
-        tag("find"),
-        tag("sum"),
-        tag("first"),
-        tag("propagate"),
-    ))(input)
+fn parse_field_assignment(input: &str) -> IResult<&str, FieldAssignment> {
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, value) = parse_expression(input)?;
+
+    Ok((input, FieldAssignment { name, value }))
 }
 
-fn arg_list(input: &str) -> IResult<&str, Vec<Arg>> {
-    separated_list1(ws(char(',')), arg)(input)
-}
-
-fn arg(input: &str) -> IResult<&str, Arg> {
-    alt((
-        map(named_arg, |(name, value)| Arg::Named { name, value }),
-        map(expr, Arg::Positional),
-    ))(input)
-}
-
-fn named_arg(input: &str) -> IResult<&str, (String, Expr)> {
-    let (input, name) = ws(identifier)(input)?;
-    let (input, _) = ws(char('='))(input)?;
-    let (input, value) = ws(expr)(input)?;
-    Ok((input, (name.to_string(), value)))
-}
-
-fn logic_expr(input: &str) -> IResult<&str, LogicExpr> {
-    let (input, op) = logic_op(input)?;
-    let (input, args) = alt((
-        delimited(ws(char('{')), expr_list, ws(char('}'))),
-        delimited(ws(char('(')), expr_list, ws(char(')'))),
-        value(Vec::new(), tag("")), // No args
-    ))(input)?;
-    
-    Ok((input, LogicExpr { op, args }))
-}
-
-fn logic_op(input: &str) -> IResult<&str, LogicOp> {
-    alt((
-        value(LogicOp::All, tag("All")),
-        value(LogicOp::Any, tag("Any")),
-        value(LogicOp::Not, tag("Not")),
-        map(
-            tuple((tag("Exactly"), ws(char('<')), ws(int_literal), ws(char('>')))),
-            |(_, _, n, _)| LogicOp::Exactly(n as i32)
+fn parse_call(input: &str) -> IResult<&str, Expression> {
+    let (input, name) = alt((parse_identifier, parse_type_name))(input)?;
+    let (input, _) = skip_whitespace_and_comments(input)?;
+    let (input, args) = delimited(
+        char('('),
+        separated_list0(
+            preceded(skip_whitespace_and_comments, char(',')),
+            parse_expression,
         ),
+        preceded(skip_whitespace_and_comments, char(')')),
+    )(input)?;
+
+    Ok((input, Expression::Call(name, args)))
+}
+
+fn parse_lambda(input: &str) -> IResult<&str, Expression> {
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, param_info) = opt(alt((
         map(
-            tuple((tag("AtLeast"), ws(char('<')), ws(int_literal), ws(char('>')))),
-            |(_, _, n, _)| LogicOp::AtLeast(n as i32)
+            tuple((parse_type_name, preceded(multispace1, parse_identifier))),
+            |(type_name, param)| (Some(param), Some(type_name)),
         ),
-        map(
-            tuple((tag("AtMost"), ws(char('<')), ws(int_literal), ws(char('>')))),
-            |(_, _, n, _)| LogicOp::AtMost(n as i32)
-        ),
-    ))(input)
+        map(parse_identifier, |param| (Some(param), None)),
+    )))(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("->")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, body) = parse_expression(input)?;
+
+    let (param, param_type) = param_info.unwrap_or((None, None));
+
+    Ok((
+        input,
+        Expression::Lambda(Lambda {
+            param,
+            param_type,
+            body: Box::new(body),
+        }),
+    ))
 }
 
-fn expr_list(input: &str) -> IResult<&str, Vec<Expr>> {
-    separated_list0(ws(char(',')), ws(expr))(input)
-}
+fn parse_field_access(input: &str) -> IResult<&str, Expression> {
+    let (input, base) = parse_identifier(input)?;
+    let (input, fields) = many1(preceded(char('.'), parse_identifier))(input)?;
 
-fn object_literal(input: &str) -> IResult<&str, ObjectLiteral> {
-    let (input, type_name) = ws(type_name)(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, fields) = field_assign_list(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    
-    Ok((input, ObjectLiteral {
-        type_name: type_name.to_string(),
-        fields,
-    }))
-}
-
-fn anonymous_object_literal(input: &str) -> IResult<&str, Vec<FieldAssign>> {
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, fields) = field_assign_list(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    
-    Ok((input, fields))
-}
-
-fn list_literal(input: &str) -> IResult<&str, Vec<Expr>> {
-    let (input, _) = ws(char('['))(input)?;
-    let (input, exprs) = separated_list0(ws(char(',')), ws(expr))(input)?;
-    let (input, _) = ws(char(']'))(input)?;
-    Ok((input, exprs))
-}
-
-fn set_literal(input: &str) -> IResult<&str, Vec<Expr>> {
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, exprs) = separated_list0(ws(char(',')), ws(expr))(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    Ok((input, exprs))
-}
-
-fn field_access(input: &str) -> IResult<&str, FieldAccess> {
-    let (input, base) = identifier(input)?;
-    let (input, fields) = many0(preceded(char('.'), identifier))(input)?;
-    
-    // Only return field access if there are actually fields accessed
-    if fields.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
+    let mut expr = Expression::Identifier(base);
+    for field in fields {
+        expr = Expression::FieldAccess(Box::new(expr), field);
     }
-    
-    Ok((input, FieldAccess {
-        base: base.to_string(),
-        fields: fields.into_iter().map(|s| s.to_string()).collect(),
-    }))
+
+    Ok((input, expr))
 }
 
-fn solve_call(input: &str) -> IResult<&str, SolveCall> {
-    let (input, var_name) = ws(identifier)(input)?;
-    let (input, _) = ws(char('='))(input)?;
-    let (input, _) = ws(tag("solve"))(input)?;
-    let (input, _) = ws(char('('))(input)?;
-    let (input, target) = ws(expr)(input)?;
-    let (input, _) = ws(char(','))(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, objectives) = separated_list0(ws(char(',')), objective_item)(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    let (input, constraints) = opt(preceded(
-        ws(char(',')),
-        delimited(ws(char('{')), separated_list0(ws(char(',')), ws(expr)), ws(char('}')))
-    ))(input)?;
-    let (input, _) = ws(char(')'))(input)?;
-    
-    Ok((input, SolveCall {
-        var_name: var_name.to_string(),
-        target,
-        objectives,
-        constraints: constraints.unwrap_or_default(),
-    }))
+fn parse_filter(input: &str) -> IResult<&str, Expression> {
+    let (input, _) = tag("filter")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, context) = parse_expression(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, predicate) = parse_expression(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((
+        input,
+        Expression::Filter(Box::new(context), Box::new(predicate)),
+    ))
 }
 
-fn objective_item(input: &str) -> IResult<&str, ObjectiveItem> {
-    let (input, name) = ws(identifier)(input)?;
-    let (input, _) = ws(char(':'))(input)?;
-    let (input, weight) = ws(float_literal)(input)?;
-    
-    Ok((input, ObjectiveItem {
-        name: name.to_string(),
-        weight,
-    }))
+fn parse_spread(input: &str) -> IResult<&str, Expression> {
+    let (input, _) = tag("...")(input)?;
+    let (input, expr) = parse_expression(input)?;
+    Ok((input, Expression::Spread(Box::new(expr))))
 }
 
-fn identifier(input: &str) -> IResult<&str, &str> {
-    recognize(pair(
-        alt((alpha1, tag("_"))),
-        many0(alt((alphanumeric1, tag("_")))),
+fn parse_literal(input: &str) -> IResult<&str, Literal> {
+    alt((
+        value(Literal::Bool(true), tag("true")),
+        value(Literal::Bool(false), tag("false")),
+        map(parse_float, Literal::Float),
+        map(parse_integer, Literal::Int),
+        map(parse_string, Literal::String),
     ))(input)
 }
 
-fn type_name(input: &str) -> IResult<&str, &str> {
-    recognize(pair(
-        take_while1(|c: char| c.is_ascii_uppercase()),
-        take_while(|c: char| c.is_alphanumeric() || c == '_'),
-    ))(input)
+fn parse_string(input: &str) -> IResult<&str, String> {
+    let (input, _) = char('"')(input)?;
+    let (input, content) = take_until("\"")(input)?;
+    let (input, _) = char('"')(input)?;
+    Ok((input, content.to_string()))
 }
 
-fn global_context(input: &str) -> IResult<&str, ()> {
-    let (input, _) = char('*')(input)?;
-    Ok((input, ()))
+fn parse_float(input: &str) -> IResult<&str, f64> {
+    let (input, float_str) = recognize(tuple((digit1, char('.'), digit1)))(input)?;
+    Ok((input, float_str.parse().unwrap()))
 }
 
-fn enum_decl(input: &str) -> IResult<&str, EnumDecl> {
-    let (input, _) = ws(tag("enum"))(input)?;
-    let (input, name) = ws(type_name)(input)?;
-    let (input, _) = ws(char('{'))(input)?;
-    let (input, variants) = enum_variant_list(input)?;
-    let (input, _) = ws(char('}'))(input)?;
-    
-    Ok((input, EnumDecl {
-        name: name.to_string(),
-        variants,
-    }))
-}
-
-fn enum_variant_list(input: &str) -> IResult<&str, Vec<EnumVariant>> {
-    let (input, first) = opt(enum_variant)(input)?;
-    if first.is_none() {
-        return Ok((input, Vec::new()));
+fn parse_integer(input: &str) -> IResult<&str, i64> {
+    let (input, sign) = opt(char('-'))(input)?;
+    let (input, digits) = digit1(input)?;
+    let mut num: i64 = digits.parse().unwrap();
+    if sign.is_some() {
+        num = -num;
     }
-    
-    let mut variants = vec![first.unwrap()];
-    let mut remaining = input;
-    
-    loop {
-        // Try to consume optional comma and whitespace
-        let (input_after_comma, _) = opt(ws(char(',')))(remaining)?;
-        
-        // Try to parse another variant
-        if let Ok((new_input, variant)) = ws(enum_variant)(input_after_comma) {
-            variants.push(variant);
-            remaining = new_input;
-        } else {
-            // No more variants, return what we have
-            remaining = input_after_comma;
-            break;
+    Ok((input, num))
+}
+
+fn parse_identifier(input: &str) -> IResult<&str, String> {
+    let (input, first) = alt((alpha1, tag("_")))(input)?;
+    let (input, rest) = many0(alt((alphanumeric1, tag("_"))))(input)?;
+    let mut result = first.to_string();
+    for part in rest {
+        result.push_str(part);
+    }
+    Ok((input, result))
+}
+
+fn parse_type_name(input: &str) -> IResult<&str, String> {
+    let (input, first_char) = take_while1(|c: char| c.is_ascii_uppercase())(input)?;
+    let (input, rest) = many0(alt((alphanumeric1, tag("_"))))(input)?;
+    let mut result = first_char.to_string();
+    for part in rest {
+        result.push_str(part);
+    }
+    Ok((input, result))
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeChecker {
+    types: HashMap<String, TypeDecl>,
+    aliases: HashMap<String, Type>,
+    variables: HashMap<String, Type>,
+}
+
+impl TypeChecker {
+    pub fn new() -> Self {
+        Self {
+            types: HashMap::new(),
+            aliases: HashMap::new(),
+            variables: HashMap::new(),
         }
     }
 
-    Ok((remaining, variants))
+    pub fn check_program(&mut self, program: &Program) -> LynxResult<()> {
+        for statement in &program.statements {
+            self.check_statement(statement)?;
+        }
+        Ok(())
+    }
+
+    fn check_statement(&mut self, statement: &Statement) -> LynxResult<()> {
+        match statement {
+            Statement::TypeDecl(type_decl) => {
+                self.check_type_decl(type_decl)?;
+                self.types.insert(type_decl.name.clone(), type_decl.clone());
+            }
+            Statement::Alias(alias) => {
+                self.check_type(&alias.target)?;
+                self.aliases
+                    .insert(alias.name.clone(), alias.target.clone());
+            }
+            Statement::Assignment(assignment) => {
+                let expr_type = self.infer_type(&assignment.expr)?;
+                self.variables.insert(assignment.name.clone(), expr_type);
+            }
+            Statement::Solve(solve) => {
+                self.check_expression(&solve.objective)?;
+                self.check_expression(&solve.constraints)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_type_decl(&self, type_decl: &TypeDecl) -> LynxResult<()> {
+        for field in &type_decl.fields {
+            self.check_type(&field.field_type)?;
+            if let Some(default_value) = &field.default_value {
+                self.check_expression(default_value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_type(&self, type_ref: &Type) -> LynxResult<()> {
+        match type_ref {
+            Type::Primitive(_) => Ok(()),
+            Type::Named(name) => {
+                if !self.types.contains_key(name) && !self.aliases.contains_key(name) {
+                    Err(LynxError::UndefinedSymbol(name.clone()))
+                } else {
+                    Ok(())
+                }
+            }
+            Type::Parameterized(name, params) => {
+                self.check_type(&Type::Named(name.clone()))?;
+                for param in params {
+                    self.check_type(param)?;
+                }
+                Ok(())
+            }
+            Type::Collection(inner) => self.check_type(inner),
+            Type::Bounded(inner, _, _) => self.check_type(inner),
+        }
+    }
+
+    fn check_expression(&self, expr: &Expression) -> LynxResult<()> {
+        match expr {
+            Expression::Literal(_) => Ok(()),
+            Expression::Identifier(name) => {
+                if !self.variables.contains_key(name) {
+                    Err(LynxError::UndefinedSymbol(name.clone()))
+                } else {
+                    Ok(())
+                }
+            }
+            Expression::FieldAccess(base, _) => self.check_expression(base),
+            Expression::Call(_, args) => {
+                for arg in args {
+                    self.check_expression(arg)?;
+                }
+                Ok(())
+            }
+            Expression::Lambda(lambda) => self.check_expression(&lambda.body),
+            Expression::LogicOp(logic_op) => {
+                for operand in &logic_op.operands {
+                    self.check_expression(operand)?;
+                }
+                Ok(())
+            }
+            Expression::Constructor(name, fields) => {
+                if !self.types.contains_key(name) {
+                    return Err(LynxError::UndefinedSymbol(name.clone()));
+                }
+                for field in fields {
+                    self.check_expression(&field.value)?;
+                }
+                Ok(())
+            }
+            Expression::Range(_, _) => Ok(()),
+            Expression::Filter(context, predicate) => {
+                self.check_expression(context)?;
+                self.check_expression(predicate)
+            }
+            Expression::Spread(expr) => self.check_expression(expr),
+            Expression::GlobalContext => Ok(()),
+        }
+    }
+
+    fn infer_type(&self, expr: &Expression) -> LynxResult<Type> {
+        match expr {
+            Expression::Literal(literal) => Ok(self.literal_type(literal)),
+            Expression::Identifier(name) => self
+                .variables
+                .get(name)
+                .cloned()
+                .ok_or_else(|| LynxError::UndefinedSymbol(name.clone())),
+            Expression::Range(_, _) => Ok(Type::Primitive(PrimitiveType::Int)),
+            Expression::Constructor(name, _) => {
+                if self.types.contains_key(name) {
+                    Ok(Type::Named(name.clone()))
+                } else {
+                    Err(LynxError::UndefinedSymbol(name.clone()))
+                }
+            }
+            Expression::Call(name, _) => match name.as_str() {
+                "Bool" => Ok(Type::Primitive(PrimitiveType::Bool)),
+                "Integer" => Ok(Type::Primitive(PrimitiveType::Int)),
+                _ => Err(LynxError::UndefinedSymbol(name.clone())),
+            },
+            Expression::LogicOp(_) => Ok(Type::Primitive(PrimitiveType::Bool)),
+            _ => Err(LynxError::TypeError("Cannot infer type".to_string())),
+        }
+    }
+
+    fn literal_type(&self, literal: &Literal) -> Type {
+        match literal {
+            Literal::Bool(_) => Type::Primitive(PrimitiveType::Bool),
+            Literal::Int(_) => Type::Primitive(PrimitiveType::Int),
+            Literal::Float(_) => Type::Primitive(PrimitiveType::Float),
+            Literal::String(_) => Type::Primitive(PrimitiveType::String),
+        }
+    }
 }
 
-fn enum_variant(input: &str) -> IResult<&str, EnumVariant> {
-    let (input, name) = ws(type_name)(input)?;
-    let (input, value) = opt(preceded(ws(char('=')), ws(int_literal)))(input)?;
-
-    Ok((
-        input,
-        EnumVariant {
-            name: name.to_string(),
-            value,
-        },
-    ))
-}
-
-fn enum_access(input: &str) -> IResult<&str, EnumAccess> {
-    let (input, enum_name) = type_name(input)?;
-    let (input, _) = char('.')(input)?;
-    let (input, variant_name) = type_name(input)?;
-
-    Ok((
-        input,
-        EnumAccess {
-            enum_name: enum_name.to_string(),
-            variant_name: variant_name.to_string(),
-        },
-    ))
+impl Default for TypeChecker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -954,413 +797,418 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bound_type_decl() {
-        let input = "type Size: 0..1";
-        let result = parse_program(input).unwrap();
-
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::TypeDecl(type_decl) => {
-                assert_eq!(type_decl.name, "Size");
-                assert_eq!(
-                    type_decl.base_type,
-                    BaseType::Primitive(PrimitiveType::Bound(0, 1))
-                );
-                assert_eq!(type_decl.fields.len(), 0);
+    fn test_parse_simple_assignment() {
+        let input = "x = Bool()";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        assert_eq!(assignment.name, "x");
+        match assignment.expr {
+            Expression::Call(name, args) => {
+                assert_eq!(name, "Bool");
+                assert_eq!(args.len(), 0);
             }
-            _ => panic!("Expected type declaration"),
+            _ => panic!("Expected Call expression"),
         }
     }
 
     #[test]
-    fn test_simple_type_decl() {
-        let input = "type Size: int";
-        let result = parse_program(input).unwrap();
+    fn test_parse_type_declaration() {
+        let input = "type Color : Bool { @tag : str }";
+        let result = parse_type_decl(input);
+        assert!(result.is_ok());
+        let (_, type_decl) = result.unwrap();
+        assert_eq!(type_decl.name, "Color");
+        assert_eq!(type_decl.fields.len(), 1);
+        assert_eq!(type_decl.fields[0].name, "tag");
+        assert!(type_decl.fields[0].is_attribute);
+    }
 
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::TypeDecl(type_decl) => {
-                assert_eq!(type_decl.name, "Size");
-                assert_eq!(type_decl.fields.len(), 0);
+    #[test]
+    fn test_parse_range() {
+        let input = "z = -2..1";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::Range(start, end) => {
+                assert_eq!(start, -2);
+                assert_eq!(end, 1);
             }
-            _ => panic!("Expected type declaration"),
+            _ => panic!("Expected Range expression"),
         }
     }
 
     #[test]
-    fn test_type_with_fields() {
-        let input = r#"type Hammer: bool {
-            material: string,
-            size: Size,
-            cost: float
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::TypeDecl(type_decl) => {
-                assert_eq!(type_decl.name, "Hammer");
-                assert_eq!(type_decl.fields.len(), 3);
-                assert_eq!(type_decl.fields[0].name, "material");
-                assert_eq!(type_decl.fields[1].name, "size");
-                assert_eq!(type_decl.fields[2].name, "cost");
+    fn test_parse_logic_op() {
+        let input = "a = All(x, y, z)";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::LogicOp(logic_op) => {
+                assert!(matches!(logic_op.op, LogicOperator::All));
+                assert_eq!(logic_op.operands.len(), 3);
             }
-            _ => panic!("Expected type declaration"),
+            _ => panic!("Expected LogicOp expression"),
         }
     }
 
     #[test]
-    fn test_new_instance_syntax() {
-        let input = r#"Hammer hammer1 {
-            material: "steel",
-            size: 10
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
+    fn test_type_checker() {
+        let mut checker = TypeChecker::new();
+
+        let type_decl = TypeDecl {
+            name: "Color".to_string(),
+            base_type: BaseType::Bool,
+            fields: vec![Field {
+                name: "tag".to_string(),
+                field_type: Type::Primitive(PrimitiveType::String),
+                is_attribute: true,
+                default_value: None,
+            }],
+        };
+
+        assert!(checker.check_type_decl(&type_decl).is_ok());
+        checker.types.insert("Color".to_string(), type_decl);
+
+        let assignment = Assignment {
+            name: "red".to_string(),
+            expr: Expression::Constructor(
+                "Color".to_string(),
+                vec![FieldAssignment {
+                    name: "tag".to_string(),
+                    value: Expression::Literal(Literal::String("red".to_string())),
+                }],
+            ),
+        };
+
+        assert!(checker.check_expression(&assignment.expr).is_ok());
+    }
+
+    #[test]
+    fn test_parse_comments() {
+        let input = "// Line comment\n/* Block comment */\nx = Bool()";
+        let result = parse_program(input);
+        assert!(result.is_ok());
+        let (_, program) = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
             Statement::Assignment(assignment) => {
-                assert_eq!(assignment.type_name, "Hammer");
-                assert_eq!(assignment.name, "hammer1");
-                match &assignment.value {
-                    Expr::AnonymousObjectLiteral(fields) => {
-                        assert_eq!(fields.len(), 2);
+                assert_eq!(assignment.name, "x");
+            }
+            _ => panic!("Expected Assignment statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_integer_with_bounds() {
+        let input = "y = Integer(0, 5)";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::Call(name, args) => {
+                assert_eq!(name, "Integer");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Call expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_with_multiple_fields() {
+        let input = "type Wheel : Bool { @tag : str, @weight : float }";
+        let result = parse_type_decl(input);
+        assert!(result.is_ok());
+        let (_, type_decl) = result.unwrap();
+        assert_eq!(type_decl.name, "Wheel");
+        assert_eq!(type_decl.fields.len(), 2);
+        assert_eq!(type_decl.fields[0].name, "tag");
+        assert_eq!(type_decl.fields[1].name, "weight");
+        assert!(type_decl.fields[0].is_attribute);
+        assert!(type_decl.fields[1].is_attribute);
+    }
+
+    #[test]
+    fn test_parse_constructor_with_field_assignments() {
+        let input = "red = Color(tag = \"red\")";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::Constructor(name, fields) => {
+                assert_eq!(name, "Color");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, "tag");
+                match &fields[0].value {
+                    Expression::Literal(Literal::String(s)) => {
+                        assert_eq!(s, "red");
                     }
-                    _ => panic!("Expected anonymous object literal for instance declaration"),
+                    _ => panic!("Expected String literal"),
                 }
             }
-            _ => panic!("Expected assignment (instance declaration)"),
+            _ => panic!("Expected Constructor expression"),
         }
     }
 
     #[test]
-    fn test_single_line_comment() {
-        let input = r#"// This is a comment
-        type Size: int"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-    }
-
-    #[test]
-    fn test_multi_line_comment() {
-        let input = r#"/* This is a
-        multi-line comment */
-        type Size: int"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-    }
-
-    #[test]
-    fn test_optional_field() {
-        let input = r#"type Toolbox: All {
-            nails: Any[Nail]?
+    fn test_parse_composite_type_with_relationships() {
+        let input = r#"type Price : All {
+            colors : Any[Color],
+            wheel  : Wheel,
+            @price : float,
         }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::TypeDecl(type_decl) => {
-                assert_eq!(type_decl.fields.len(), 1);
-                assert!(type_decl.fields[0].is_optional);
-            }
-            _ => panic!("Expected type declaration"),
+        let result = parse_type_decl(input);
+        assert!(result.is_ok());
+        let (_, type_decl) = result.unwrap();
+        assert_eq!(type_decl.name, "Price");
+        assert!(matches!(type_decl.base_type, BaseType::All));
+        assert_eq!(type_decl.fields.len(), 3);
+
+        // Check relationship fields
+        assert_eq!(type_decl.fields[0].name, "colors");
+        assert!(!type_decl.fields[0].is_attribute);
+        assert_eq!(type_decl.fields[1].name, "wheel");
+        assert!(!type_decl.fields[1].is_attribute);
+
+        // Check attribute field
+        assert_eq!(type_decl.fields[2].name, "price");
+        assert!(type_decl.fields[2].is_attribute);
+    }
+
+    #[test]
+    fn test_parse_type_alias() {
+        let input = "alias ColorRule = Exactly<1>[Color]";
+        let result = parse_alias(input);
+        assert!(result.is_ok());
+        let (_, alias) = result.unwrap();
+        assert_eq!(alias.name, "ColorRule");
+        match alias.target {
+            Type::Collection(inner) => match *inner {
+                Type::Parameterized(name, params) => {
+                    assert_eq!(name, "Exactly");
+                    assert_eq!(params.len(), 1);
+                }
+                _ => panic!("Expected Parameterized type"),
+            },
+            _ => panic!("Expected Collection type"),
         }
     }
 
     #[test]
-    fn test_field_access() {
-        let input = "float test = c.toolbox.hammers.cost";
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::FieldAccess(field_access) => {
-                        assert_eq!(field_access.base, "c");
-                        assert_eq!(field_access.fields, vec!["toolbox", "hammers", "cost"]);
+    fn test_parse_lambda_expression() {
+        let input = "@totalPrice : float = (Bicycle b) -> sum(b.prices.price)";
+        let result = parse_field(input);
+        assert!(result.is_ok());
+        let (_, field) = result.unwrap();
+        assert_eq!(field.name, "totalPrice");
+        assert!(field.is_attribute);
+        assert!(field.default_value.is_some());
+
+        match field.default_value.unwrap() {
+            Expression::Lambda(lambda) => {
+                assert_eq!(lambda.param, Some("b".to_string()));
+                assert_eq!(lambda.param_type, Some("Bicycle".to_string()));
+            }
+            _ => panic!("Expected Lambda expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_field_access() {
+        let input = "total = myBike.totalPrice";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::FieldAccess(base, field) => {
+                match *base {
+                    Expression::Identifier(name) => {
+                        assert_eq!(name, "myBike");
                     }
-                    _ => panic!("Expected field access"),
+                    _ => panic!("Expected Identifier"),
+                }
+                assert_eq!(field, "totalPrice");
+            }
+            _ => panic!("Expected FieldAccess expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_filter_expression() {
+        let input = "aRed = filter(*, c -> c.tag == \"red\")";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::Filter(context, predicate) => {
+                match *context {
+                    Expression::GlobalContext => {}
+                    _ => panic!("Expected GlobalContext"),
+                }
+                match *predicate {
+                    Expression::Lambda(_) => {}
+                    _ => panic!("Expected Lambda predicate"),
                 }
             }
-            _ => panic!("Expected assignment"),
+            _ => panic!("Expected Filter expression"),
         }
     }
 
     #[test]
-    fn test_solve_call() {
-        let input = r#"a_john_instance = solve(john, { nail3: 3.0, nail: 2.0, nail1: 1.0 }, { Not { hammer1 } })"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::SolveCall(solve) => {
-                assert_eq!(solve.var_name, "a_john_instance");
-                assert_eq!(solve.objectives.len(), 3);
-                assert_eq!(solve.constraints.len(), 1);
-            }
-            _ => panic!("Expected solve call"),
-        }
-    }
-
-    #[test]
-    fn test_complex_lambda_with_comparison() {
-        let input = r#"type Test: All {
-            workable: bool = (Test c) -> c.age >= 18
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::TypeDecl(type_decl) => {
-                assert_eq!(type_decl.fields.len(), 1);
-                assert!(type_decl.fields[0].default.is_some());
-                // Check that the default is a lambda with a binary operation
-                match &type_decl.fields[0].default {
-                    Some(Expr::Lambda(lambda)) => {
-                        assert_eq!(lambda.param, Some("c".to_string()));
-                        assert_eq!(lambda.param_type, Some("Test".to_string()));
-                        match &*lambda.body {
-                            Expr::BinaryOp(binop) => {
-                                assert_eq!(binop.operator, ">=");
-                            }
-                            _ => panic!("Expected binary operation in lambda body"),
+    fn test_parse_spread_operator() {
+        let input = "rule = ColorRule(...aRed)";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::Constructor(name, fields) => {
+                assert_eq!(name, "ColorRule");
+                assert_eq!(fields.len(), 1);
+                match &fields[0].value {
+                    Expression::Spread(inner) => match **inner {
+                        Expression::Identifier(ref name) => {
+                            assert_eq!(name, "aRed");
                         }
+                        _ => panic!("Expected Identifier in spread"),
+                    },
+                    _ => panic!("Expected Spread expression"),
+                }
+            }
+            _ => panic!("Expected Constructor expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_solve_statement() {
+        let input = r#"solution = minimize(
+            objective = myBike.totalPrice,
+            suchThat = All(myBike)
+        )"#;
+        let result = parse_solve(input);
+        assert!(result.is_ok());
+        let (_, solve) = result.unwrap();
+        assert_eq!(solve.name, "solution");
+        assert!(matches!(solve.method, SolveMethod::Minimize));
+
+        match solve.objective {
+            Expression::FieldAccess(base, field) => {
+                match *base {
+                    Expression::Identifier(name) => {
+                        assert_eq!(name, "myBike");
                     }
-                    _ => panic!("Expected lambda expression as default"),
+                    _ => panic!("Expected Identifier"),
                 }
+                assert_eq!(field, "totalPrice");
             }
-            _ => panic!("Expected type declaration"),
+            _ => panic!("Expected FieldAccess expression"),
         }
     }
 
     #[test]
-    fn test_builtin_call_with_lambda() {
-        let input = r#"Hammer test = find((Hammer h) -> h.size >= 8)"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::BuiltinCall(call) => {
-                        assert_eq!(call.name, "find");
-                        assert_eq!(call.args.len(), 1);
-                        match &call.args[0] {
-                            Arg::Positional(Expr::Lambda(_)) => {
-                                // Success - we have a lambda as argument
-                            }
-                            _ => panic!("Expected lambda as argument to find"),
-                        }
+    fn test_parse_parameterized_type() {
+        let input = "type Week : Integer<0, 52> { @dates: str }";
+        let result = parse_type_decl(input);
+        assert!(result.is_ok());
+        let (_, type_decl) = result.unwrap();
+        assert_eq!(type_decl.name, "Week");
+        match type_decl.base_type {
+            BaseType::Integer(min, max) => {
+                assert_eq!(min, Some(0));
+                assert_eq!(max, Some(52));
+            }
+            _ => panic!("Expected Integer base type"),
+        }
+    }
+
+    #[test]
+    fn test_parse_exactly_operator() {
+        let input = "constraint = Exactly<12>(productionWeek)";
+        let result = parse_assignment(input);
+        assert!(result.is_ok());
+        let (_, assignment) = result.unwrap();
+        match assignment.expr {
+            Expression::LogicOp(logic_op) => {
+                match logic_op.op {
+                    LogicOperator::Exactly(n) => {
+                        assert_eq!(n, 12);
                     }
-                    _ => panic!("Expected builtin call"),
+                    _ => panic!("Expected Exactly operator"),
                 }
+                assert_eq!(logic_op.operands.len(), 1);
             }
-            _ => panic!("Expected assignment"),
+            _ => panic!("Expected LogicOp expression"),
         }
     }
 
     #[test]
-    fn test_global_context_symbol() {
-        let input = "Context test = *";
-        let result = parse_program(input).unwrap();
+    fn test_complete_example_parsing() {
+        let example_code = r#"
+        // Boolean variable declaration 
+        x = Bool()
         
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::GlobalContext => {
-                        // Success - global context parsed correctly
-                    }
-                    _ => panic!("Expected global context expression"),
-                }
-            }
-            _ => panic!("Expected assignment"),
-        }
-    }
+        // Type declaration
+        type Color : Bool { @tag : str }
+        
+        // Constructor
+        red = Color(tag = "red")
+        
+        // Type alias
+        alias ColorRule = Exactly<1>[Color]
+        
+        // Range
+        z = -2..1
+        "#;
 
-    #[test] 
-    fn test_find_with_global_context() {
-        let input = r#"Hammer result = find(*, (Hammer h) -> h.size >= 8)"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::BuiltinCall(call) => {
-                        assert_eq!(call.name, "find");
-                        assert_eq!(call.args.len(), 2);
-                        
-                        // First argument should be global context
-                        match &call.args[0] {
-                            Arg::Positional(Expr::GlobalContext) => {},
-                            _ => panic!("Expected global context as first argument"),
-                        }
-                        
-                        // Second argument should be lambda
-                        match &call.args[1] {
-                            Arg::Positional(Expr::Lambda(_)) => {},
-                            _ => panic!("Expected lambda as second argument"),
-                        }
-                    }
-                    _ => panic!("Expected builtin call"),
-                }
-            }
-            _ => panic!("Expected assignment"),
-        }
+        let result = parse_program(example_code);
+        assert!(result.is_ok());
+        let (_, program) = result.unwrap();
+        assert_eq!(program.statements.len(), 5);
+
+        // Check each statement type
+        assert!(matches!(program.statements[0], Statement::Assignment(_)));
+        assert!(matches!(program.statements[1], Statement::TypeDecl(_)));
+        assert!(matches!(program.statements[2], Statement::Assignment(_)));
+        assert!(matches!(program.statements[3], Statement::Alias(_)));
+        assert!(matches!(program.statements[4], Statement::Assignment(_)));
     }
 
     #[test]
-    fn test_solve_with_global_context() {
-        let input = r#"solution = solve(*, { nail1: 1.0 })"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::SolveCall(solve) => {
-                assert_eq!(solve.var_name, "solution");
-                
-                // Target should be global context
-                match &solve.target {
-                    Expr::GlobalContext => {},
-                    _ => panic!("Expected global context as target"),
-                }
-                
-                // Should have one objective
-                assert_eq!(solve.objectives.len(), 1);
-                assert_eq!(solve.objectives[0].name, "nail1");
-                assert_eq!(solve.objectives[0].weight, 1.0);
-            }
-            _ => panic!("Expected solve call"),
-        }
-    }
+    fn test_type_checker_with_complete_example() {
+        let mut checker = TypeChecker::new();
 
-    #[test]
-    fn test_new_match_syntax() {
-        let input = r#"int test = match {
-            _: 5
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::Match(match_expr) => {
-                        assert_eq!(match_expr.cases.len(), 1);
-                        match &match_expr.cases[0] {
-                            MatchCase::Wildcard { value } => {
-                                match value {
-                                    Expr::Literal(Literal::Int(5)) => {},
-                                    _ => panic!("Expected literal int 5"),
-                                }
-                            }
-                            _ => panic!("Expected wildcard case"),
-                        }
-                    }
-                    _ => panic!("Expected match expression"),
-                }
-            }
-            _ => panic!("Expected assignment"),
-        }
-    }
+        // Create a simple program
+        let program = Program {
+            statements: vec![
+                Statement::TypeDecl(TypeDecl {
+                    name: "Color".to_string(),
+                    base_type: BaseType::Bool,
+                    fields: vec![Field {
+                        name: "tag".to_string(),
+                        field_type: Type::Primitive(PrimitiveType::String),
+                        is_attribute: true,
+                        default_value: None,
+                    }],
+                }),
+                Statement::Assignment(Assignment {
+                    name: "red".to_string(),
+                    expr: Expression::Constructor(
+                        "Color".to_string(),
+                        vec![FieldAssignment {
+                            name: "tag".to_string(),
+                            value: Expression::Literal(Literal::String("red".to_string())),
+                        }],
+                    ),
+                }),
+                Statement::Assignment(Assignment {
+                    name: "z".to_string(),
+                    expr: Expression::Range(-2, 1),
+                }),
+            ],
+        };
 
-    #[test]
-    fn test_match_in_lambda() {
-        let input = r#"int weight = (Hammer h) -> match {
-            _: 5
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::Lambda(lambda) => {
-                        assert_eq!(lambda.param, Some("h".to_string()));
-                        assert_eq!(lambda.param_type, Some("Hammer".to_string()));
-                        match &*lambda.body {
-                            Expr::Match(match_expr) => {
-                                assert_eq!(match_expr.cases.len(), 1);
-                            }
-                            _ => panic!("Expected match expression in lambda body"),
-                        }
-                    }
-                    _ => panic!("Expected lambda expression"),
-                }
-            }
-            _ => panic!("Expected assignment"),
-        }
-    }
-
-    #[test]
-    fn test_enum_declaration() {
-        let input = r#"enum Material {
-            Steel,
-            Wood,
-            Plastic
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::EnumDecl(enum_decl) => {
-                assert_eq!(enum_decl.name, "Material");
-                assert_eq!(enum_decl.variants.len(), 3);
-                assert_eq!(enum_decl.variants[0].name, "Steel");
-                assert_eq!(enum_decl.variants[0].value, None);
-                assert_eq!(enum_decl.variants[1].name, "Wood");
-                assert_eq!(enum_decl.variants[2].name, "Plastic");
-            }
-            _ => panic!("Expected enum declaration"),
-        }
-    }
-
-    #[test]
-    fn test_enum_with_values() {
-        let input = r#"enum Size {
-            Small = 1,
-            Medium = 2,
-            Large = 3
-        }"#;
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::EnumDecl(enum_decl) => {
-                assert_eq!(enum_decl.name, "Size");
-                assert_eq!(enum_decl.variants.len(), 3);
-                assert_eq!(enum_decl.variants[0].name, "Small");
-                assert_eq!(enum_decl.variants[0].value, Some(1));
-                assert_eq!(enum_decl.variants[1].name, "Medium");
-                assert_eq!(enum_decl.variants[1].value, Some(2));
-                assert_eq!(enum_decl.variants[2].name, "Large");
-                assert_eq!(enum_decl.variants[2].value, Some(3));
-            }
-            _ => panic!("Expected enum declaration"),
-        }
-    }
-
-    #[test]
-    fn test_enum_access() {
-        let input = "Material test = Material.Steel";
-        let result = parse_program(input).unwrap();
-        
-        assert_eq!(result.statements.len(), 1);
-        match &result.statements[0] {
-            Statement::Assignment(assignment) => {
-                match &assignment.value {
-                    Expr::EnumAccess(enum_access) => {
-                        assert_eq!(enum_access.enum_name, "Material");
-                        assert_eq!(enum_access.variant_name, "Steel");
-                    }
-                    _ => panic!("Expected enum access expression"),
-                }
-            }
-            _ => panic!("Expected assignment"),
-        }
+        // Type checking should pass for this well-formed program
+        assert!(checker.check_program(&program).is_ok());
     }
 }

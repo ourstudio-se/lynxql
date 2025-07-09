@@ -26,13 +26,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [[bin]]
-name = "example"
-path = "src/bin/example.rs"
+name = "debug_parser"
+path = "src/bin/debug_parser.rs"
 
 [[bin]]
-name = "lynx-lsp"
-path = "src/bin/lsp_server.rs"
+name = "test_example"
+path = "src/bin/test_example.rs"
 
 [[bin]]
-name = "test-resilient-parser"
-path = "src/bin/test_resilient_parser.rs"
+name = "test_complete_example"
+path = "src/bin/test_complete_example.rs"
+

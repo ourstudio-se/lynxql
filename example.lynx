@@ -1,155 +1,97 @@
+// Line Comment
+/* Block Coment */
 
-// COMMENTS are 
-// 1. Single line comments "//"
-// 2. Multi-line comments "/* ... */"
+// Boolean variable declaration 
+x = Bool()
 
-// Property type declaration. Probably not used that often, but useful for defining properties of primitive types.
-type BoxType: string
+// Integer variable declaration (y \in {0, 1, 2, 3, 4, 5}) 
+y = Integer(0, 5)
 
-enum Material {
-    Steel,
-    Wood,
-    Plastic
+// Shorthand for variable declaration (z \in {-2, -1, 0, 1})
+z = -2..1
+
+// Composite variable declaration
+a = All(x, y, z)
+
+// Finding a solution to "a"
+solA = maximize({ x=1.0 }, a)
+
+// Checking that we got expected values by indexing a's subvariables x, y and z
+// Note that All(x, y, z) is equivalent to x + y + z >= 1+5+1, e.i geq to the sum of their upper bounds
+assert(solA[0] == 1..1)
+assert(solA[1] == 5..5)
+assert(solA[2] == 1..1)
+
+// Lynx TYPES and ATTRIBUTES
+// primitive type declarations
+// @ marks that the member is an attribute
+type Color : Bool { @tag : str, }
+type Wheel : Bool { @tag : str, @weight : float }
+
+// Example instantiation of a custom type
+color1 = Color(tag="example color")
+
+// primitive type declaration with Integer
+type Week : Integer<0, 52> { @dates: str }
+
+// Example instantiation of an Integer custom type
+springWeeks = Week<14, 26>(dates="april-june")
+
+// Example of "not ok" instantiation of Integer custom type
+notOkSpringWeeks = Week<-4, 24>(dates="dont know") // Since -4..24 is outside of parent domain
+
+// Composite type declaration. All logical combinators are allowed to use when the type has relationships to other variable types.
+// It is not ok to combine a Bool custom type with a relationship member, or, a composite custom type with only attribute members.
+type Price : All {
+    
+    // No @ means a relationship. Here colors and wheel are joint on All logical combinator.
+    colors : Any[Color],
+    wheel  : Wheel,
+    
+    // @ means an attribute. Here we say that Price has an float attribute "price".
+    @price : float,
 }
 
-// Primitive type declaration
-// We define a type Hammer as a boolean type with additional properties
-type Hammer: bool {
-  material: Material,
-  size: int,
-  cost: float,
-  
-  // Conditional property declaration on type level.
-  // The cost of a hammer is determined by its material and size.
-  weight: int = (Hammer h) -> match {
-    h.material == "steel": 10,
-    h.material == "wood": 7,
-    _: 5
-  }
+// Type alias. Just a pointer to a specific type (including type arguments)
+alias ColorRule = Exactly<1>[Color]
+alias WheelRule = Exactly<1>[Wheel]
+
+// composite
+type Bicycle : All {
+    colors      : ColorRule,
+    wheels      : WheelRule,
+    prices      : Free[Price],
+
+    // Lambdas are ok to use when the property is calculated on call. Compilator will make sure the correct type is returned (i hope)
+    @totalPrice : float = (Bicycle b) -> sum(b.prices.price),
 }
 
-type Nail: bool {
-  length: int,
-  amount: int,
-  cost: float
-}
+// data declarations
+red   = Color(tag = "red")
+front = Wheel(tag = "front", weight = 3.2)
 
-type BoxType: bool {
-  width: int,
-  height: int,
-  depth: int
-}
+price1 = Price(colors = Any(red), wheel = front, price = 150)
 
-// Composite type declarations
-// "All" means that each relationship must be satisfied for the type to be valid.
-// If it was for instance "Any" instead of "All", then it would be enough for "hammer" to be satisfied for Toolbox be valid.
-type Toolbox: All {
-  
-  // A toolbox must contain at least one hammer
-  // By default, we assign all hammers that have a size of at least 8 to the toolbox.
-  hammers: AtLeast<1>[Hammer] = find((Hammer h) -> h.size >= 8),
-  
-  // A toolbox can contain multiple nails or none (? means optional)
-  nails: Any[Nail]?
+// compile-time sets
+aRed   = filter(*, c -> c.tag == "red")
+frontW = filter(*, w -> w.tag == "front")
 
-  // A toolbox has a BoxType. This is an enum type since when Toolbox is instantiated,
-  // it must be assigned a BoxType. 
-  boxType: BoxType,
-}
-
-type Carpenter: All {
-  
-  // A carpenter has a name and an age
-  name: string,
-  age: int,
-
-  // Conditional property declaration on type level.
-  // By default, the carpenter is considered workable if they are at least 18 years old.
-  workable: bool = (Carpenter c) -> c.age >= 18,
-  
-  // A carpenter must have a toolbox
-  toolbox: Toolbox
-
-  // This is a way to dynamically calculate the salery
-  salery: float = (Carpenter c) -> 20000.0 - (sum(c.toolbox.hammers.cost) + sum(c.toolbox.nails, 0.0))
-}
-
-
-// Instantiation of types
-// Here we create a specific instance of the Carpenter type
-Hammer hammer1 = {
-  material: Material.Steel,
-  size: 10,
-  cost: 15.0
-}
-Hammer hammer2 = {
-  material: Material.Wood,
-  size: 8,
-  cost: 10.0
-}
-Nail nail1 = {
-  length: 5,
-  amount: 100,
-  cost: 0.1
-}
-Nail nail2 = {
-  length: 10,
-  amount: 50,
-  cost: 0.2
-}
-BoxType boxType1 = {
-  width: 30,
-  height: 20,
-  depth: 15
-}
-Carpenter john = {
-  name: "John Doe",
-  age: 30,
-
-  // Overriding the default property "workable" to true
-  workable: true,
-
-  // Assigning a toolbox to the carpenter
-  toolbox: Toolbox {
-    // Overriding the default hammer property to include specific hammers
-    hammers: AtLeast<1> {hammer1, hammer2},
-    nails: Any {nail1, nail2},
-    boxType: boxType1
-  }
-}
-Carpenter jane = {
-  name: "Jane Smith",
-  age: 25,
-  toolbox: Toolbox {
-    hammers: AtLeast<1> {hammer1, hammer2},
-    // Using a lambda function to find nails with length >= 10
-    // Notice that this will pick up the nail3 instance defined later
-    nails: Any { find((Nail n) -> n.length >= 10) },
-    boxType: boxType1
-  }
-}
-
-// Additional instances of Nail (note that this would appear in the toolbox of Jane)
-Nail nail3 = {
-  length: 12,
-  amount: 55,
-  cost: 0.3
-}
-
-// "Locking" nail3 to be true
-IntegerRange<1,1> nail3_constraint = 1..1
-
-// Finding a solution for the carpenter "john"
-// Where we prefer nail3 over nail2 and nail1, and we do not want to use hammer1 
-Carpenter a_john_instance = solve(john, { nail3: 3.0, nail: 2.0, nail1: 1.0 }, { Not { hammer1 } })
-
-// Finding one carpenter with same parameters
-Exactly<1> a_carpenter_instances = solve(
-  Exactly<1> { find((Carpenter x) -> x) }, // Model
-  { nail3: 3.0, nail: 2.0, nail1: 1.0 }, // Objective
-  { Not { hammer1 } } // Additional constraints
+myBike = Bicycle(
+    colors = ColorRule(...aRed),
+    wheels = WheelRule(...frontW),
+    prices = Free(price1),
 )
 
-// Select the first one in the list
-Carpenter a_carpenter = first(a_carpenter_instances)
-a_carpenter.salery
+alias Week = Integer<1,52>
+productionWeek = Week(4,32)
+
+solution = minimize(
+    objective = myBike.totalPrice,
+    suchThat  = All(
+        myBike,
+        Exactly<12>(productionWeek),
+        Has(frontW.tag, "front"),
+    ),
+)
+
+chosenColour = solution.colors.firstTrue()
