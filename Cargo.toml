@@ -1,6 +1,6 @@
 [package]
 name = "lynxql"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A parser for the Lynx declarative modeling language - a statically typed language for expressing combinatorial optimization problems"
 license = "MIT"
