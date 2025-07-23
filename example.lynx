@@ -72,12 +72,14 @@ front = Wheel(tag = "front", weight = 3.2)
 
 price1 = Price(colors = Any(red), wheel = front, price = 150)
 
-// compile-time sets
+// compile-time sets of "red colors" and "front wheels"
+// "*" means the full context, i.e. it contains all variables throughout the program
 aRed   = filter(*, c -> c.tag == "red")
 frontW = filter(*, w -> w.tag == "front")
 
+// Instantiating a Bicycle with red colors, front wheels and a price
 myBike = Bicycle(
-    colors = ColorRule(...aRed),
+    colors = ColorRule(...aRed), // "..." means that the set is expanded into arguments
     wheels = WheelRule(...frontW),
     prices = Free(price1),
 )
@@ -88,9 +90,11 @@ productionWeek = Week(4,32)
 solution = minimize(
     objective = myBike.totalPrice,
     suchThat  = All(
+        // The solution must be a valid Bicycle
         myBike,
-        Exactly<12>(productionWeek),
-        Has(frontW.tag, "front"),
+        // Constraints on the production week 
+        productionWeek >= 12,
+        productionWeek <= 26,
     ),
 )
 
